@@ -1,43 +1,45 @@
-"""Interactive image canvas widget for drawing and editing boxes."""
+"""Interactive image canvas widget with zoom and pan."""
 
 import copy
 from PyQt5.QtWidgets import QLabel
-from PyQt5.QtGui import QPainter, QPen, QColor, QFont, QBrush, QPixmap
-from PyQt5.QtCore import Qt, QRect, QPoint
+from PyQt5.QtCore import Qt, QPoint
 from ..config.constants import HANDLE_SIZE, HandlePosition, MIN_BOX_SIZE
 from ..utils.geometry import BoxGeometry
 
 
 class ImageCanvas(QLabel):
-    """Custom widget for image display with box drawing, moving, and resizing."""
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.parent_window = parent
         self.setMouseTracking(True)
         
-        # Drawing new box
         self.drawing = False
         self.start_point = None
         self.end_point = None
         
-        # Moving/resizing existing box
         self.dragging = False
         self.drag_handle = HandlePosition.NONE
         self.drag_start = None
         self.drag_box_original = None
+        
+        self.zoom_level = 1.0
+        self.min_zoom = 0.5
+        self.max_zoom = 5.0
+        self.pan_offset_x = 0
+        self.pan_offset_y = 0
+        self.panning = False
+        self.pan_start = None
+        self.pan_start_offset = None
+    
+    def reset_view(self):
+        self.zoom_level = 1.0
+        self.pan_offset_x = 0
+        self.pan_offset_y = 0
+        if self.parent_window:
+            self.parent_window.draw_boxes()
     
     def get_handle_at(self, pos, box_idx):
-        """
-        Check if position is on a resize handle or inside the box.
-        
-        Args:
-            pos: Mouse position
-            box_idx: Index of box to check
-            
-        Returns:
-            HandlePosition enum value
-        """
         if not self.parent_window or box_idx < 0:
             return HandlePosition.NONE
         
@@ -50,20 +52,21 @@ class ImageCanvas(QLabel):
             box,
             self.parent_window.original_pixmap.width() if self.parent_window.original_pixmap else 0,
             self.parent_window.original_pixmap.height() if self.parent_window.original_pixmap else 0,
-            self.parent_window.scale_factor_x,
-            self.parent_window.scale_factor_y
+            self.parent_window.scale_factor_x * self.zoom_level,
+            self.parent_window.scale_factor_y * self.zoom_level
         )
         
         if not rect:
             return HandlePosition.NONE
         
-        # Convert to image coordinates
-        x = pos.x() - self.parent_window.offset_x
-        y = pos.y() - self.parent_window.offset_y
+        adj_offset_x = self.parent_window.offset_x + self.pan_offset_x
+        adj_offset_y = self.parent_window.offset_y + self.pan_offset_y
+        
+        x = pos.x() - adj_offset_x
+        y = pos.y() - adj_offset_y
         
         hs = HANDLE_SIZE
         
-        # Check corners first (they take priority)
         if abs(x - rect.left()) <= hs and abs(y - rect.top()) <= hs:
             return HandlePosition.TOP_LEFT
         if abs(x - rect.right()) <= hs and abs(y - rect.top()) <= hs:
@@ -73,7 +76,6 @@ class ImageCanvas(QLabel):
         if abs(x - rect.right()) <= hs and abs(y - rect.bottom()) <= hs:
             return HandlePosition.BOTTOM_RIGHT
         
-        # Check edges
         if rect.left() <= x <= rect.right() and abs(y - rect.top()) <= hs:
             return HandlePosition.TOP
         if rect.left() <= x <= rect.right() and abs(y - rect.bottom()) <= hs:
@@ -83,14 +85,12 @@ class ImageCanvas(QLabel):
         if rect.top() <= y <= rect.bottom() and abs(x - rect.right()) <= hs:
             return HandlePosition.RIGHT
         
-        # Check if inside box (for moving)
         if rect.contains(int(x), int(y)):
             return HandlePosition.MOVE
         
         return HandlePosition.NONE
     
     def get_cursor_for_handle(self, handle):
-        """Get appropriate cursor for handle type."""
         cursor_map = {
             HandlePosition.TOP_LEFT: Qt.SizeFDiagCursor,
             HandlePosition.BOTTOM_RIGHT: Qt.SizeFDiagCursor,
@@ -104,19 +104,52 @@ class ImageCanvas(QLabel):
         }
         return cursor_map.get(handle, Qt.ArrowCursor)
     
+    def wheelEvent(self, event):
+        if not self.parent_window or not self.parent_window.original_pixmap:
+            return
+        
+        mouse_pos = event.pos()
+        old_zoom = self.zoom_level
+        
+        delta = event.angleDelta().y()
+        if delta > 0:
+            self.zoom_level = min(self.zoom_level * 1.15, self.max_zoom)
+        else:
+            self.zoom_level = max(self.zoom_level / 1.15, self.min_zoom)
+        
+        if old_zoom != self.zoom_level:
+            zoom_ratio = self.zoom_level / old_zoom
+            
+            rel_x = mouse_pos.x() - self.parent_window.offset_x - self.pan_offset_x
+            rel_y = mouse_pos.y() - self.parent_window.offset_y - self.pan_offset_y
+            
+            self.pan_offset_x -= rel_x * (zoom_ratio - 1)
+            self.pan_offset_y -= rel_y * (zoom_ratio - 1)
+            
+            self.parent_window.draw_boxes()
+            self.parent_window.update_zoom_label()
+    
     def mousePressEvent(self, event):
-        """Handle mouse press events."""
         if not self.parent_window:
             return
         
+        if event.button() == Qt.MiddleButton:
+            self.panning = True
+            self.pan_start = event.pos()
+            self.pan_start_offset = (self.pan_offset_x, self.pan_offset_y)
+            self.setCursor(Qt.ClosedHandCursor)
+            return
+        
         if event.button() == Qt.LeftButton:
-            if self.parent_window.draw_mode:
-                # Drawing new box
+            if self.parent_window.mask_mode:
+                self.drawing = True
+                self.start_point = event.pos()
+                self.end_point = event.pos()
+            elif self.parent_window.draw_mode:
                 self.drawing = True
                 self.start_point = event.pos()
                 self.end_point = event.pos()
             else:
-                # Check if clicking on selected box handle
                 selected_idx = self.parent_window.annotation_mgr.selected_index
                 if selected_idx >= 0:
                     handle = self.get_handle_at(event.pos(), selected_idx)
@@ -129,10 +162,8 @@ class ImageCanvas(QLabel):
                         self.parent_window.state_mgr.save_state(boxes)
                         return
                 
-                # Try to select a box
                 self.parent_window.select_box_at(event.pos().x(), event.pos().y())
                 
-                # After selection, check if we can start dragging
                 selected_idx = self.parent_window.annotation_mgr.selected_index
                 if selected_idx >= 0:
                     handle = self.get_handle_at(event.pos(), selected_idx)
@@ -145,11 +176,24 @@ class ImageCanvas(QLabel):
                         self.parent_window.state_mgr.save_state(boxes)
     
     def mouseMoveEvent(self, event):
-        """Handle mouse move events."""
         if not self.parent_window:
             return
         
-        if self.parent_window.draw_mode:
+        if self.panning:
+            dx = event.pos().x() - self.pan_start.x()
+            dy = event.pos().y() - self.pan_start.y()
+            self.pan_offset_x = self.pan_start_offset[0] + dx
+            self.pan_offset_y = self.pan_start_offset[1] + dy
+            self.parent_window.draw_boxes()
+            return
+        
+        if self.parent_window.mask_mode:
+            if self.drawing:
+                self.end_point = event.pos()
+                self.parent_window.draw_temp_mask(self.start_point, self.end_point)
+            else:
+                self.setCursor(Qt.CrossCursor)
+        elif self.parent_window.draw_mode:
             if self.drawing:
                 self.end_point = event.pos()
                 self.parent_window.draw_temp_box(self.start_point, self.end_point)
@@ -158,7 +202,6 @@ class ImageCanvas(QLabel):
         elif self.dragging and self.drag_handle != HandlePosition.NONE:
             self.update_box_from_drag(event.pos())
         else:
-            # Update cursor based on hover
             selected_idx = self.parent_window.annotation_mgr.selected_index
             if selected_idx >= 0:
                 handle = self.get_handle_at(event.pos(), selected_idx)
@@ -167,14 +210,22 @@ class ImageCanvas(QLabel):
                 self.setCursor(Qt.ArrowCursor)
     
     def mouseReleaseEvent(self, event):
-        """Handle mouse release events."""
         if not self.parent_window:
+            return
+        
+        if event.button() == Qt.MiddleButton:
+            self.panning = False
+            self.pan_start = None
+            self.pan_start_offset = None
+            self.setCursor(Qt.ArrowCursor)
             return
         
         if event.button() == Qt.LeftButton:
             if self.drawing:
                 self.drawing = False
-                if self.parent_window.draw_mode and self.start_point and self.end_point:
+                if self.parent_window.mask_mode and self.start_point and self.end_point:
+                    self.parent_window.finalize_new_mask(self.start_point, self.end_point)
+                elif self.parent_window.draw_mode and self.start_point and self.end_point:
                     self.parent_window.finalize_new_box(self.start_point, self.end_point)
                 self.start_point = None
                 self.end_point = None
@@ -186,7 +237,6 @@ class ImageCanvas(QLabel):
                 self.parent_window.update_list_widget()
     
     def update_box_from_drag(self, current_pos):
-        """Update the selected box based on drag operation."""
         if not self.parent_window or not self.drag_box_original:
             return
         
@@ -200,15 +250,13 @@ class ImageCanvas(QLabel):
         orig_w = self.parent_window.original_pixmap.width()
         orig_h = self.parent_window.original_pixmap.height()
         
-        # Calculate delta in image coordinates
-        dx = (current_pos.x() - self.drag_start.x()) / self.parent_window.scale_factor_x / orig_w
-        dy = (current_pos.y() - self.drag_start.y()) / self.parent_window.scale_factor_y / orig_h
+        dx = (current_pos.x() - self.drag_start.x()) / (self.parent_window.scale_factor_x * self.zoom_level) / orig_w
+        dy = (current_pos.y() - self.drag_start.y()) / (self.parent_window.scale_factor_y * self.zoom_level) / orig_h
         
         boxes = self.parent_window.annotation_mgr.get_boxes()
         box = boxes[selected_idx]
         orig = self.drag_box_original
         
-        # Get original box edges in normalized coordinates
         orig_left = orig['x'] - orig['w'] / 2
         orig_right = orig['x'] + orig['w'] / 2
         orig_top = orig['y'] - orig['h'] / 2
@@ -217,7 +265,6 @@ class ImageCanvas(QLabel):
         new_left, new_right = orig_left, orig_right
         new_top, new_bottom = orig_top, orig_bottom
         
-        # Apply drag based on handle type
         if self.drag_handle == HandlePosition.MOVE:
             new_left = orig_left + dx
             new_right = orig_right + dx
@@ -244,12 +291,10 @@ class ImageCanvas(QLabel):
         elif self.drag_handle == HandlePosition.RIGHT:
             new_right = max(orig_right + dx, orig_left + MIN_BOX_SIZE)
         
-        # Clamp to image bounds
         new_left, new_right, new_top, new_bottom = BoxGeometry.clamp_box_to_bounds(
             new_left, new_right, new_top, new_bottom
         )
         
-        # Update box
         result = BoxGeometry.edges_to_center_format(new_left, new_right, new_top, new_bottom)
         box.update(result)
         

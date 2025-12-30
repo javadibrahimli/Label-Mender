@@ -15,20 +15,20 @@ STYLESHEET = f"""
     
     QGroupBox {{
         font-weight: 600;
-        font-size: 11px;
+        font-size: 10px;
         color: {COLORS['text']};
         background-color: {COLORS['surface']};
         border: 1px solid {COLORS['border']};
         border-radius: 4px;
-        margin-top: 10px;
-        padding: 8px 6px 6px 6px;
+        margin-top: 8px;
+        padding: 6px 4px 4px 4px;
     }}
     QGroupBox::title {{
         subcontrol-origin: margin;
         subcontrol-position: top left;
-        left: 8px;
+        left: 6px;
         top: 2px;
-        padding: 0 4px;
+        padding: 0 3px;
         color: {COLORS['text_secondary']};
     }}
     
@@ -37,8 +37,9 @@ STYLESHEET = f"""
         color: {COLORS['text']};
         border: 1px solid {COLORS['border']};
         border-radius: 3px;
-        padding: 5px 10px;
-        font-size: 11px;
+        padding: 4px 6px;
+        font-size: 10px;
+        min-height: 22px;
     }}
     QPushButton:hover {{
         background-color: {COLORS['surface_elevated']};

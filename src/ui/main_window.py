@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLabel, QFileDialog, QListWidget, 
                              QSpinBox, QMessageBox, QSlider, QComboBox, 
                              QProgressBar, QGroupBox, QInputDialog, QApplication,
-                             QSizePolicy)
+                             QSizePolicy, QTabWidget, QScrollArea, QFrame)
 from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QFont, QBrush, QIcon
 from PyQt5.QtCore import Qt, QRect
 
@@ -18,7 +18,6 @@ from .image_canvas import ImageCanvas
 
 
 class MainWindow(QMainWindow):
-    """Main application window for YOLO annotation tool."""
     
     def __init__(self):
         super().__init__()
@@ -26,7 +25,6 @@ class MainWindow(QMainWindow):
         self.setGeometry(50, 50, 1400, 900)
         self.setMinimumSize(1100, 700)
         
-        # Set window icon
         icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'icon', 'icon.png')
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
@@ -34,13 +32,11 @@ class MainWindow(QMainWindow):
         else:
             self.icon_path = None
         
-        # Managers
         self.model_mgr = ModelManager()
         self.annotation_mgr = AnnotationManager()
         self.state_mgr = StateManager()
         self.file_mgr = FileManager()
         
-        # State variables
         self.image_folder = ""
         self.image_list = []
         self.current_index = 0
@@ -51,23 +47,23 @@ class MainWindow(QMainWindow):
         self.offset_x = 0
         self.offset_y = 0
         
-        # Class and threshold
         self.class_names = {}
         self.confidence_threshold = DEFAULT_CONFIDENCE
         self.raw_detections = []
         
-        # Drawing mode
         self.draw_mode = False
         self.default_class = 0
         
-        # Class file path
+        self.mask_mode = False
+        self.mask_rectangles = []
+        self.selected_mask_index = -1
+        
         self.class_file_path = ""
         
         self.init_ui()
         self.auto_load_model()
     
     def init_ui(self):
-        """Initialize the user interface."""
         self.setStyleSheet(STYLESHEET)
         
         central_widget = QWidget()
@@ -76,7 +72,6 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(8)
         main_layout.setContentsMargins(8, 8, 8, 8)
         
-        # Left Panel - Image Canvas
         canvas_wrapper = QWidget()
         canvas_wrapper.setStyleSheet(CANVAS_STYLE)
         canvas_layout = QVBoxLayout(canvas_wrapper)
@@ -89,22 +84,50 @@ class MainWindow(QMainWindow):
         self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         canvas_layout.addWidget(self.image_label)
         
-        # Right Panel - Controls
-        right_panel = self.create_control_panel()
+        zoom_bar = QHBoxLayout()
+        self.lbl_zoom = QLabel("100%")
+        self.lbl_zoom.setStyleSheet(f"color: {COLORS['text']}; font-size: 10px;")
+        self.btn_reset_view = QPushButton("Reset [R]")
+        self.btn_reset_view.setToolTip("Reset zoom and pan")
+        self.btn_reset_view.setMaximumWidth(80)
+        self.btn_reset_view.clicked.connect(self.reset_view)
+        zoom_bar.addWidget(self.lbl_zoom)
+        zoom_bar.addStretch()
+        zoom_bar.addWidget(self.btn_reset_view)
+        canvas_layout.addLayout(zoom_bar)
+        
+        self.tabs = QTabWidget()
+        self.tabs.setMinimumWidth(200)
+        self.tabs.setMaximumWidth(350)
+        self.tabs.setStyleSheet(f"""
+            QTabWidget::pane {{ border: 1px solid {COLORS['border']}; background: {COLORS['panel']}; }}
+            QTabBar::tab {{ background: {COLORS['surface']}; color: {COLORS['text']}; padding: 5px 10px; border: 1px solid {COLORS['border']}; font-size: 10px; }}
+            QTabBar::tab:selected {{ background: {COLORS['accent']}; color: white; }}
+        """)
+        
+        controls_tab = self.create_control_panel()
+        stats_tab = self.create_stats_panel()
+        
+        self.tabs.addTab(controls_tab, "Controls")
+        self.tabs.addTab(stats_tab, "Statistics")
         
         main_layout.addWidget(canvas_wrapper, 80)
-        main_layout.addWidget(right_panel, 20)
+        main_layout.addWidget(self.tabs, 20)
     
     def create_control_panel(self):
-        """Create the right control panel."""
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setStyleSheet(f"QScrollArea {{ border: none; background: transparent; }}")
+        
         right_panel = QWidget()
         right_panel.setStyleSheet(PANEL_STYLE)
         right_layout = QVBoxLayout(right_panel)
-        right_layout.setSpacing(6)
-        right_layout.setContentsMargins(8, 8, 8, 8)
-        right_panel.setFixedWidth(280)
+        right_layout.setSpacing(4)
+        right_layout.setContentsMargins(6, 6, 6, 6)
+        right_panel.setMinimumWidth(200)
+        right_panel.setMaximumWidth(320)
         
-        # Header with logo and version
         header_row = QHBoxLayout()
         header_row.setSpacing(10)
         
@@ -122,54 +145,53 @@ class MainWindow(QMainWindow):
         
         right_layout.addLayout(header_row)
         
-        # Configuration Section
         config_group = self.create_config_section()
-        
-        # Detections Section
         detect_group = self.create_detections_section()
-        
-        # Edit Section
         edit_group = self.create_edit_section()
-        
-        # Navigation Section
+        mask_group = self.create_mask_section()
         nav_group = self.create_navigation_section()
         
-        # Info label
         self.lbl_info = QLabel("Ready")
         self.lbl_info.setWordWrap(True)
         self.lbl_info.setStyleSheet(INFO_LABEL_STYLE)
         
-        # Assemble right panel
         right_layout.addWidget(config_group)
         right_layout.addWidget(detect_group)
         right_layout.addWidget(edit_group)
+        right_layout.addWidget(mask_group)
         right_layout.addWidget(nav_group)
         right_layout.addWidget(self.lbl_info)
         right_layout.addStretch()
         
-        return right_panel
+        scroll_area.setWidget(right_panel)
+        return scroll_area
     
     def create_config_section(self):
-        """Create configuration group box."""
         config_group = QGroupBox("Configuration")
         config_layout = QVBoxLayout(config_group)
         config_layout.setSpacing(4)
         
-        # Model/Classes row
         model_row = QHBoxLayout()
-        self.btn_load_model = QPushButton("Load Model")
+        self.btn_load_model = QPushButton("Load .pt")
+        self.btn_load_model.setToolTip("Load Ultralytics YOLO model (.pt)")
         self.btn_load_model.clicked.connect(self.load_model)
+        self.btn_load_yolov4 = QPushButton("Load YOLOv4")
+        self.btn_load_yolov4.setToolTip("Load YOLOv4-tiny model (.cfg + .weights + .names)")
+        self.btn_load_yolov4.clicked.connect(self.load_yolov4_model)
+        model_row.addWidget(self.btn_load_model)
+        model_row.addWidget(self.btn_load_yolov4)
+        config_layout.addLayout(model_row)
+        
+        classes_row = QHBoxLayout()
         self.btn_load_classes = QPushButton("Load Classes")
         self.btn_load_classes.clicked.connect(self.load_class_names)
-        model_row.addWidget(self.btn_load_model)
-        model_row.addWidget(self.btn_load_classes)
-        config_layout.addLayout(model_row)
+        classes_row.addWidget(self.btn_load_classes)
+        config_layout.addLayout(classes_row)
         
         self.lbl_model_status = QLabel("Model: Not loaded")
         self.lbl_model_status.setStyleSheet(STATUS_ERROR_STYLE)
         config_layout.addWidget(self.lbl_model_status)
         
-        # Folder row
         folder_row = QHBoxLayout()
         self.btn_open_dir = QPushButton("Open Folder")
         self.btn_open_dir.clicked.connect(self.open_directory)
@@ -179,13 +201,11 @@ class MainWindow(QMainWindow):
         folder_row.addWidget(self.btn_add_class)
         config_layout.addLayout(folder_row)
         
-        # Progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setFormat("%v / %m  (%p%)")
         self.progress_bar.setTextVisible(True)
         config_layout.addWidget(self.progress_bar)
         
-        # Confidence threshold
         conf_row = QHBoxLayout()
         conf_row.addWidget(QLabel("Conf:"))
         self.conf_slider = QSlider(Qt.Horizontal)
@@ -202,7 +222,6 @@ class MainWindow(QMainWindow):
         return config_group
     
     def create_detections_section(self):
-        """Create detections group box."""
         detect_group = QGroupBox("Detections")
         detect_layout = QVBoxLayout(detect_group)
         detect_layout.setSpacing(4)
@@ -212,30 +231,24 @@ class MainWindow(QMainWindow):
         self.box_list.currentRowChanged.connect(self.list_selection_changed)
         detect_layout.addWidget(self.box_list)
         
-        self.btn_sort_boxes = QPushButton("Sort Left to Right")
+        self.btn_sort_boxes = QPushButton("Sort L→R")
+        self.btn_sort_boxes.setToolTip("Sort boxes from left to right")
         self.btn_sort_boxes.clicked.connect(self.sort_boxes_left_to_right)
         detect_layout.addWidget(self.btn_sort_boxes)
         
         return detect_group
     
     def create_edit_section(self):
-        """Create edit group box."""
         edit_group = QGroupBox("Edit")
         edit_layout = QVBoxLayout(edit_group)
         edit_layout.setSpacing(4)
         
-        # Draw mode
-        self.btn_draw_mode = QPushButton("Draw Mode: OFF  [W]")
+        self.btn_draw_mode = QPushButton("Draw: OFF [W]")
         self.btn_draw_mode.setCheckable(True)
+        self.btn_draw_mode.setToolTip("Toggle draw mode to add new boxes")
         self.btn_draw_mode.clicked.connect(self.toggle_draw_mode)
         edit_layout.addWidget(self.btn_draw_mode)
         
-        # Hint label
-        self.lbl_edit_hint = QLabel("Click to select, drag to move/resize")
-        self.lbl_edit_hint.setStyleSheet(HINT_LABEL_STYLE)
-        edit_layout.addWidget(self.lbl_edit_hint)
-        
-        # Class selector
         class_row = QHBoxLayout()
         class_row.addWidget(QLabel("Class:"))
         self.combo_class = QComboBox()
@@ -248,7 +261,6 @@ class MainWindow(QMainWindow):
         class_row.addWidget(self.spin_class)
         edit_layout.addLayout(class_row)
         
-        # New box class
         new_class_row = QHBoxLayout()
         new_class_row.addWidget(QLabel("New Box:"))
         self.spin_new_class = QSpinBox()
@@ -258,12 +270,11 @@ class MainWindow(QMainWindow):
         new_class_row.addWidget(self.spin_new_class)
         edit_layout.addLayout(new_class_row)
         
-        # Delete box
-        self.btn_delete_box = QPushButton("Delete Box  [Del]")
+        self.btn_delete_box = QPushButton("Delete [Del]")
+        self.btn_delete_box.setToolTip("Delete selected box")
         self.btn_delete_box.clicked.connect(self.delete_current_box)
         edit_layout.addWidget(self.btn_delete_box)
         
-        # Undo/Redo
         undo_row = QHBoxLayout()
         self.btn_undo = QPushButton("Undo")
         self.btn_undo.clicked.connect(self.undo)
@@ -275,65 +286,280 @@ class MainWindow(QMainWindow):
         
         return edit_group
     
+    def create_mask_section(self):
+        mask_group = QGroupBox("Mask (Hide Objects)")
+        mask_layout = QVBoxLayout(mask_group)
+        mask_layout.setSpacing(4)
+        
+        self.btn_mask_mode = QPushButton("Mask: OFF [M]")
+        self.btn_mask_mode.setCheckable(True)
+        self.btn_mask_mode.setToolTip("Draw gray rectangles to hide objects from training")
+        self.btn_mask_mode.setStyleSheet(f"background-color: #555; color: white;")
+        self.btn_mask_mode.clicked.connect(self.toggle_mask_mode)
+        mask_layout.addWidget(self.btn_mask_mode)
+        
+        self.mask_list = QListWidget()
+        self.mask_list.setMaximumHeight(80)
+        self.mask_list.currentRowChanged.connect(self.mask_list_selection_changed)
+        mask_layout.addWidget(self.mask_list)
+        
+        mask_btn_row = QHBoxLayout()
+        self.btn_delete_mask = QPushButton("Delete")
+        self.btn_delete_mask.setToolTip("Delete selected mask")
+        self.btn_delete_mask.clicked.connect(self.delete_selected_mask)
+        self.btn_clear_masks = QPushButton("Clear All")
+        self.btn_clear_masks.setToolTip("Clear all masks")
+        self.btn_clear_masks.clicked.connect(self.clear_all_masks)
+        mask_btn_row.addWidget(self.btn_delete_mask)
+        mask_btn_row.addWidget(self.btn_clear_masks)
+        mask_layout.addLayout(mask_btn_row)
+        
+        return mask_group
+    
     def create_navigation_section(self):
-        """Create navigation group box."""
         nav_group = QGroupBox("Navigation")
         nav_layout = QVBoxLayout(nav_group)
         nav_layout.setSpacing(4)
         
-        # Prev/Next
         nav_btn_row = QHBoxLayout()
-        self.btn_prev = QPushButton("Prev [A]")
+        self.btn_prev = QPushButton("← [A]")
+        self.btn_prev.setToolTip("Previous image")
         self.btn_prev.clicked.connect(self.prev_image)
-        self.btn_next = QPushButton("Next [D]")
+        self.btn_next = QPushButton("[D] →")
+        self.btn_next.setToolTip("Next image")
         self.btn_next.clicked.connect(self.next_image)
         nav_btn_row.addWidget(self.btn_prev)
         nav_btn_row.addWidget(self.btn_next)
         nav_layout.addLayout(nav_btn_row)
         
-        # Save button
-        self.btn_save = QPushButton("SAVE  [S]")
-        self.btn_save.setStyleSheet(f"background-color: {COLORS['accent']}; color: white; font-weight: bold; padding: 8px;")
+        self.btn_save = QPushButton("SAVE [S]")
+        self.btn_save.setStyleSheet(f"background-color: {COLORS['accent']}; color: white; font-weight: bold; padding: 6px;")
         self.btn_save.clicked.connect(self.save_annotation)
         nav_layout.addWidget(self.btn_save)
         
-        # Skip & Delete
         action_row = QHBoxLayout()
         self.btn_skip = QPushButton("Skip [Q]")
+        self.btn_skip.setToolTip("Skip to next image without saving")
         self.btn_skip.clicked.connect(self.skip_image)
-        self.btn_delete_image = QPushButton("Delete [X]")
+        self.btn_delete_image = QPushButton("Del [X]")
+        self.btn_delete_image.setToolTip("Delete current image")
         self.btn_delete_image.clicked.connect(self.delete_current_image)
         action_row.addWidget(self.btn_skip)
         action_row.addWidget(self.btn_delete_image)
         nav_layout.addLayout(action_row)
         
-        # Next Unannotated
-        self.btn_next_unannotated = QPushButton("Next Unannotated [N]")
+        self.btn_next_unannotated = QPushButton("Next Empty [N]")
+        self.btn_next_unannotated.setToolTip("Jump to next unannotated image")
         self.btn_next_unannotated.clicked.connect(self.goto_next_unannotated)
         nav_layout.addWidget(self.btn_next_unannotated)
         
         return nav_group
     
-    # ==================== MODEL & CLASS LOADING ====================
+    def create_stats_panel(self):
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setStyleSheet(f"QScrollArea {{ border: none; background: transparent; }}")
+        
+        stats_widget = QWidget()
+        stats_widget.setStyleSheet(PANEL_STYLE)
+        stats_layout = QVBoxLayout(stats_widget)
+        stats_layout.setSpacing(6)
+        stats_layout.setContentsMargins(6, 6, 6, 6)
+        stats_widget.setMinimumWidth(200)
+        stats_widget.setMaximumWidth(320)
+        
+        self.btn_refresh_stats = QPushButton("Refresh Stats")
+        self.btn_refresh_stats.setToolTip("Scan folder and update statistics")
+        self.btn_refresh_stats.clicked.connect(self.update_statistics)
+        stats_layout.addWidget(self.btn_refresh_stats)
+        
+        overview_group = QGroupBox("Overview")
+        overview_layout = QVBoxLayout(overview_group)
+        overview_layout.setSpacing(2)
+        
+        self.lbl_total_images = QLabel("Images: 0")
+        self.lbl_annotated_images = QLabel("Annotated: 0")
+        self.lbl_unannotated_images = QLabel("Empty: 0")
+        self.lbl_total_boxes = QLabel("Boxes: 0")
+        self.lbl_avg_boxes = QLabel("Avg/Image: 0.0")
+        
+        for lbl in [self.lbl_total_images, self.lbl_annotated_images, 
+                    self.lbl_unannotated_images, self.lbl_total_boxes, self.lbl_avg_boxes]:
+            lbl.setStyleSheet(f"color: {COLORS['text']}; font-size: 10px; padding: 1px;")
+            overview_layout.addWidget(lbl)
+        
+        stats_layout.addWidget(overview_group)
+        
+        class_group = QGroupBox("Classes")
+        class_layout = QVBoxLayout(class_group)
+        
+        self.class_stats_list = QListWidget()
+        self.class_stats_list.setMinimumHeight(100)
+        self.class_stats_list.setStyleSheet(f"""
+            QListWidget {{ background: {COLORS['surface']}; color: {COLORS['text']}; border: 1px solid {COLORS['border']}; font-size: 9px; }}
+            QListWidget::item {{ padding: 2px; }}
+        """)
+        class_layout.addWidget(self.class_stats_list)
+        
+        stats_layout.addWidget(class_group)
+        
+        progress_group = QGroupBox("Progress")
+        progress_layout = QVBoxLayout(progress_group)
+        
+        self.stats_progress_bar = QProgressBar()
+        self.stats_progress_bar.setFormat("%v/%m (%p%)")
+        self.stats_progress_bar.setTextVisible(True)
+        self.stats_progress_bar.setStyleSheet(f"""
+            QProgressBar {{ border: 1px solid {COLORS['border']}; background: {COLORS['surface']}; text-align: center; color: {COLORS['text']}; font-size: 9px; }}
+            QProgressBar::chunk {{ background: {COLORS['accent']}; }}
+        """)
+        progress_layout.addWidget(self.stats_progress_bar)
+        
+        stats_layout.addWidget(progress_group)
+        stats_layout.addStretch()
+        
+        scroll_area.setWidget(stats_widget)
+        return scroll_area
+    
+    def update_statistics(self):
+        if not self.image_folder or not self.image_list:
+            self.lbl_total_images.setText("Images: 0")
+            self.lbl_annotated_images.setText("Annotated: 0")
+            self.lbl_unannotated_images.setText("Empty: 0")
+            self.lbl_total_boxes.setText("Boxes: 0")
+            self.lbl_avg_boxes.setText("Avg/Image: 0.0")
+            self.class_stats_list.clear()
+            self.stats_progress_bar.setMaximum(1)
+            self.stats_progress_bar.setValue(0)
+            return
+        
+        total_images = len(self.image_list)
+        annotated = 0
+        total_boxes = 0
+        class_counts = {}
+        
+        for img in self.image_list:
+            txt_path = os.path.join(self.image_folder, os.path.splitext(img)[0] + ".txt")
+            if os.path.exists(txt_path):
+                annotated += 1
+                boxes = self.file_mgr.load_annotations(txt_path)
+                total_boxes += len(boxes)
+                for box in boxes:
+                    cls = box['class']
+                    class_name = self.class_names.get(cls, f"C{cls}")
+                    class_counts[class_name] = class_counts.get(class_name, 0) + 1
+        
+        unannotated = total_images - annotated
+        avg_boxes = total_boxes / annotated if annotated > 0 else 0
+        
+        self.lbl_total_images.setText(f"Images: {total_images}")
+        self.lbl_annotated_images.setText(f"Annotated: {annotated}")
+        self.lbl_unannotated_images.setText(f"Empty: {unannotated}")
+        self.lbl_total_boxes.setText(f"Boxes: {total_boxes}")
+        self.lbl_avg_boxes.setText(f"Avg/Image: {avg_boxes:.1f}")
+        
+        self.class_stats_list.clear()
+        sorted_classes = sorted(class_counts.items(), key=lambda x: x[1], reverse=True)
+        for class_name, count in sorted_classes:
+            percentage = (count / total_boxes * 100) if total_boxes > 0 else 0
+            bar = "█" * int(percentage / 10) + "░" * (10 - int(percentage / 10))
+            self.class_stats_list.addItem(f"{class_name}: {count} ({percentage:.0f}%) {bar}")
+        
+        self.stats_progress_bar.setMaximum(total_images)
+        self.stats_progress_bar.setValue(annotated)
+    
+    def update_zoom_label(self):
+        zoom_percent = int(self.image_label.zoom_level * 100)
+        self.lbl_zoom.setText(f"{zoom_percent}%")
+    
+    def reset_view(self):
+        self.image_label.reset_view()
+        self.update_zoom_label()
     
     def load_model(self):
-        """Load YOLO model from file dialog."""
         path, _ = QFileDialog.getOpenFileName(self, "Select Model", "", "PyTorch Model (*.pt)")
         if path:
             self._load_model_from_path(path)
     
+    def load_yolov4_model(self):
+        cfg_path, _ = QFileDialog.getOpenFileName(
+            self, "Select YOLOv4 Config File (.cfg)", "", 
+            "Config Files (*.cfg);;All Files (*)"
+        )
+        if not cfg_path:
+            return
+        
+        base_dir = os.path.dirname(cfg_path)
+        cfg_basename = os.path.splitext(os.path.basename(cfg_path))[0]
+        
+        auto_weights = None
+        for f in os.listdir(base_dir):
+            if f.endswith('.weights'):
+                if cfg_basename.split('_')[0] in f or cfg_basename in f:
+                    auto_weights = os.path.join(base_dir, f)
+                    break
+        
+        auto_names = None
+        for ext in ['.names', '.txt']:
+            for f in os.listdir(base_dir):
+                if f.lower().endswith(ext) and 'names' in f.lower():
+                    auto_names = os.path.join(base_dir, f)
+                    break
+            if not auto_names:
+                for f in os.listdir(base_dir):
+                    if f.lower().endswith(ext) and cfg_basename.split('_')[0] in f:
+                        auto_names = os.path.join(base_dir, f)
+                        break
+        
+        weights_path, _ = QFileDialog.getOpenFileName(
+            self, "Select YOLOv4 Weights File (.weights)", 
+            auto_weights if auto_weights else base_dir,
+            "Weights Files (*.weights);;All Files (*)"
+        )
+        if not weights_path:
+            return
+        
+        names_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Class Names File (.names or .txt)", 
+            auto_names if auto_names else base_dir,
+            "Names Files (*.names *.txt);;All Files (*)"
+        )
+        if not names_path:
+            return
+        
+        if self.model_mgr.load_yolov4_model(cfg_path, weights_path, names_path):
+            model_name = self.model_mgr.get_model_name()
+            input_size = f"{self.model_mgr.yolov4_input_width}x{self.model_mgr.yolov4_input_height}"
+            self.lbl_model_status.setText(f"YOLOv4: {model_name} ({input_size})")
+            self.lbl_model_status.setStyleSheet(STATUS_SUCCESS_STYLE)
+            
+            model_classes = self.model_mgr.get_class_names()
+            if model_classes:
+                self.class_names = model_classes
+                self.update_class_combo()
+                
+            QMessageBox.information(
+                self, "Model Loaded", 
+                f"YOLOv4-tiny model loaded successfully!\n\n"
+                f"Config: {os.path.basename(cfg_path)}\n"
+                f"Weights: {os.path.basename(weights_path)}\n"
+                f"Classes: {os.path.basename(names_path)}\n"
+                f"Input size: {input_size}\n"
+                f"Classes: {len(model_classes)}"
+            )
+        else:
+            QMessageBox.critical(self, "Error", "Failed to load YOLOv4 model.\n\nMake sure the files are valid.")
+    
     def auto_load_model(self):
-        """Automatically load default model if it exists."""
         if os.path.exists(DEFAULT_MODEL_PATH):
             self._load_model_from_path(DEFAULT_MODEL_PATH)
     
     def _load_model_from_path(self, path):
-        """Internal method to load model from path."""
         if self.model_mgr.load_model(path):
             self.lbl_model_status.setText(f"Model: {self.model_mgr.get_model_name()}")
             self.lbl_model_status.setStyleSheet(STATUS_SUCCESS_STYLE)
             
-            # Load class names from model
             model_classes = self.model_mgr.get_class_names()
             if model_classes:
                 self.class_names = model_classes
@@ -342,7 +568,6 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", "Failed to load model")
     
     def load_class_names(self):
-        """Load class names from file dialog."""
         path, _ = QFileDialog.getOpenFileName(
             self, "Select Class File", "", 
             "YAML Files (*.yaml *.yml);;Text Files (*.txt);;All Files (*)"
@@ -357,7 +582,6 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to load classes: {str(e)}")
     
     def add_new_class(self):
-        """Add a new class through dialog."""
         name, ok = QInputDialog.getText(self, "Add New Class", "Enter class name:")
         if ok and name.strip():
             name = name.strip()
@@ -368,7 +592,6 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Success", f"Added class {new_id}: {name}")
     
     def save_classes_to_file(self):
-        """Save class names to file."""
         if not self.class_file_path:
             path, _ = QFileDialog.getSaveFileName(
                 self, "Save Classes", "", 
@@ -385,7 +608,6 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Warning", f"Could not save classes: {str(e)}")
     
     def update_class_combo(self):
-        """Update class combo box with current classes."""
         self.combo_class.blockSignals(True)
         self.combo_class.clear()
         
@@ -401,13 +623,9 @@ class MainWindow(QMainWindow):
         self.combo_class.blockSignals(False)
     
     def get_class_name(self, class_id):
-        """Get class name for ID."""
         return self.class_names.get(class_id, f"Class {class_id}")
     
-    # ==================== FOLDER & IMAGE LOADING ====================
-    
     def open_directory(self):
-        """Open directory and load image list."""
         dir_path = QFileDialog.getExistingDirectory(self, "Select Image Folder")
         if dir_path:
             self.image_folder = dir_path
@@ -425,7 +643,6 @@ class MainWindow(QMainWindow):
             self.load_image()
     
     def update_progress(self):
-        """Update progress bar."""
         if not self.image_list:
             return
         annotated = sum(
@@ -435,13 +652,18 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(annotated)
     
     def load_image(self):
-        """Load current image and annotations."""
         if not self.image_list:
             return
         
         filename = self.image_list[self.current_index]
         self.current_image_path = os.path.join(self.image_folder, filename)
         self.original_pixmap = QPixmap(self.current_image_path)
+        
+        self.image_label.zoom_level = 1.0
+        self.image_label.pan_offset_x = 0
+        self.image_label.pan_offset_y = 0
+        self.update_zoom_label()
+        
         self.display_image()
         
         self.lbl_info.setText(f"{filename}  ({self.current_index + 1}/{len(self.image_list)})")
@@ -454,14 +676,19 @@ class MainWindow(QMainWindow):
         if os.path.exists(txt_path):
             boxes = self.file_mgr.load_annotations(txt_path)
             self.annotation_mgr.set_boxes(boxes)
+            if boxes:
+                self.lbl_info.setText(f"{filename}  ({self.current_index + 1}/{len(self.image_list)}) - {len(boxes)} labels loaded")
         elif self.model_mgr.is_loaded():
             self.run_inference()
+        
+        self.mask_rectangles = []
+        self.selected_mask_index = -1
+        self.update_mask_list()
         
         self.update_list_widget()
         self.draw_boxes()
     
     def run_inference(self):
-        """Run model inference on current image."""
         self.raw_detections = self.model_mgr.run_inference(
             self.current_image_path, 
             self.confidence_threshold
@@ -469,7 +696,6 @@ class MainWindow(QMainWindow):
         self.apply_confidence_filter()
     
     def apply_confidence_filter(self):
-        """Apply confidence threshold filter."""
         filtered = self.annotation_mgr.filter_by_confidence(
             self.raw_detections, 
             self.confidence_threshold
@@ -479,17 +705,13 @@ class MainWindow(QMainWindow):
         self.draw_boxes()
     
     def on_confidence_changed(self, value):
-        """Handle confidence slider change."""
         self.confidence_threshold = value / 100.0
         self.lbl_conf_value.setText(f"{self.confidence_threshold:.2f}")
         if self.raw_detections:
             self.state_mgr.save_state(self.annotation_mgr.get_boxes())
             self.apply_confidence_filter()
     
-    # ==================== DISPLAY ====================
-    
     def display_image(self):
-        """Display image on canvas."""
         if self.original_pixmap:
             scaled = self.original_pixmap.scaled(
                 self.image_label.size(), 
@@ -503,35 +725,51 @@ class MainWindow(QMainWindow):
             self.offset_y = (self.image_label.height() - scaled.height()) / 2
     
     def draw_boxes(self):
-        """Draw all boxes on image."""
         if not self.original_pixmap:
             return
         
-        scaled = self.original_pixmap.scaled(
+        zoom = self.image_label.zoom_level
+        pan_x = self.image_label.pan_offset_x
+        pan_y = self.image_label.pan_offset_y
+        
+        base_scaled = self.original_pixmap.scaled(
             self.image_label.size(), 
             Qt.KeepAspectRatio, 
             Qt.SmoothTransformation
         )
-        canvas = scaled.copy()
+        
+        zoomed_w = int(base_scaled.width() * zoom)
+        zoomed_h = int(base_scaled.height() * zoom)
+        zoomed = self.original_pixmap.scaled(zoomed_w, zoomed_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        
+        canvas = QPixmap(self.image_label.size())
+        canvas.fill(QColor(COLORS['canvas']))
+        
         painter = QPainter(canvas)
         painter.setRenderHint(QPainter.Antialiasing)
+        
+        draw_x = int(self.offset_x + pan_x)
+        draw_y = int(self.offset_y + pan_y)
+        painter.drawPixmap(draw_x, draw_y, zoomed)
         
         orig_w, orig_h = self.original_pixmap.width(), self.original_pixmap.height()
         boxes = self.annotation_mgr.get_boxes()
         selected_idx = self.annotation_mgr.selected_index
         
+        effective_scale_x = self.scale_factor_x * zoom
+        effective_scale_y = self.scale_factor_y * zoom
+        adj_offset_x = self.offset_x + pan_x
+        adj_offset_y = self.offset_y + pan_y
+        
         for i, box in enumerate(boxes):
-            rect = BoxGeometry.get_box_rect_px(
-                box, orig_w, orig_h, 
-                self.scale_factor_x, self.scale_factor_y
-            )
+            rect = BoxGeometry.get_box_rect_px(box, orig_w, orig_h, effective_scale_x, effective_scale_y)
             
             if not rect:
                 continue
             
+            rect.translate(int(adj_offset_x), int(adj_offset_y))
             is_selected = (i == selected_idx)
             
-            # Draw box
             if is_selected:
                 pen = QPen(QColor(0, 200, 255), 2)
             else:
@@ -541,11 +779,9 @@ class MainWindow(QMainWindow):
             painter.setBrush(Qt.NoBrush)
             painter.drawRect(rect)
             
-            # Draw resize handles for selected box
             if is_selected:
                 self.draw_handles(painter, rect)
             
-            # Label
             painter.setFont(QFont("Consolas", 9, QFont.Bold))
             label = f"{self.get_class_name(box['class'])} {box.get('conf', 1.0):.2f}"
             
@@ -558,7 +794,8 @@ class MainWindow(QMainWindow):
             painter.setPen(QColor(255, 255, 255))
             painter.drawText(int(rect.x()) + 3, int(rect.y()) - 4, label)
         
-        # Plate reading overlay
+        self._draw_existing_masks_zoomed(painter, orig_w, orig_h, effective_scale_x, effective_scale_y, adj_offset_x, adj_offset_y)
+        
         plate_text = self.annotation_mgr.get_plate_reading(self.class_names)
         if plate_text:
             painter.setFont(QFont("Consolas", 14, QFont.Bold))
@@ -573,7 +810,6 @@ class MainWindow(QMainWindow):
         self.image_label.setPixmap(canvas)
     
     def draw_handles(self, painter, rect):
-        """Draw resize handles on the selected box."""
         hs = HANDLE_SIZE
         handle_color = QColor(255, 255, 255)
         handle_border = QColor(0, 150, 200)
@@ -581,7 +817,6 @@ class MainWindow(QMainWindow):
         painter.setBrush(QBrush(handle_color))
         painter.setPen(QPen(handle_border, 1))
         
-        # Corner handles
         corners = [
             (rect.left() - hs//2, rect.top() - hs//2),
             (rect.right() - hs//2, rect.top() - hs//2),
@@ -592,7 +827,6 @@ class MainWindow(QMainWindow):
         for cx, cy in corners:
             painter.drawRect(cx, cy, hs, hs)
         
-        # Edge handles (midpoints)
         edges = [
             (rect.center().x() - hs//2, rect.top() - hs//2),
             (rect.center().x() - hs//2, rect.bottom() - hs//2),
@@ -603,40 +837,202 @@ class MainWindow(QMainWindow):
         for ex, ey in edges:
             painter.drawRect(ex, ey, hs, hs)
     
-    # ==================== DRAWING MODE ====================
-    
     def toggle_draw_mode(self):
-        """Toggle drawing mode on/off."""
+        if self.mask_mode:
+            self.toggle_mask_mode()
+        
         self.draw_mode = not self.draw_mode
         if self.draw_mode:
-            self.btn_draw_mode.setText("Draw Mode: ON  [W]")
+            self.btn_draw_mode.setText("Draw: ON [W]")
             self.btn_draw_mode.setChecked(True)
             self.image_label.setCursor(Qt.CrossCursor)
         else:
-            self.btn_draw_mode.setText("Draw Mode: OFF  [W]")
+            self.btn_draw_mode.setText("Draw: OFF [W]")
             self.btn_draw_mode.setChecked(False)
             self.image_label.setCursor(Qt.ArrowCursor)
     
-    def update_default_class(self, value):
-        """Update default class for new boxes."""
-        self.default_class = value
+    def toggle_mask_mode(self):
+        if self.draw_mode:
+            self.draw_mode = False
+            self.btn_draw_mode.setText("Draw: OFF [W]")
+            self.btn_draw_mode.setChecked(False)
+        
+        self.mask_mode = not self.mask_mode
+        if self.mask_mode:
+            self.btn_mask_mode.setText("Mask: ON [M]")
+            self.btn_mask_mode.setChecked(True)
+            self.btn_mask_mode.setStyleSheet(f"background-color: #666; color: #ff6666; font-weight: bold;")
+            self.image_label.setCursor(Qt.CrossCursor)
+        else:
+            self.btn_mask_mode.setText("Mask: OFF [M]")
+            self.btn_mask_mode.setChecked(False)
+            self.btn_mask_mode.setStyleSheet(f"background-color: #555; color: white;")
+            self.image_label.setCursor(Qt.ArrowCursor)
     
-    def draw_temp_box(self, start, end):
-        """Draw temporary box while dragging."""
+    def mask_list_selection_changed(self, row):
+        self.selected_mask_index = row
+        self.annotation_mgr.deselect()
+        self.draw_boxes()
+    
+    def delete_selected_mask(self):
+        if 0 <= self.selected_mask_index < len(self.mask_rectangles):
+            del self.mask_rectangles[self.selected_mask_index]
+            self.selected_mask_index = -1
+            self.update_mask_list()
+            self.draw_boxes()
+    
+    def clear_all_masks(self):
+        if self.mask_rectangles:
+            reply = QMessageBox.question(
+                self, "Clear Masks",
+                f"Delete all {len(self.mask_rectangles)} masks?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                self.mask_rectangles = []
+                self.selected_mask_index = -1
+                self.update_mask_list()
+                self.draw_boxes()
+    
+    def update_mask_list(self):
+        self.mask_list.clear()
+        for i, mask in enumerate(self.mask_rectangles):
+            self.mask_list.addItem(f"Mask {i+1}: ({mask['w']*100:.0f}% x {mask['h']*100:.0f}%)")
+    
+    def draw_temp_mask(self, start, end):
         if not self.original_pixmap:
             return
         
-        scaled = self.original_pixmap.scaled(
+        zoom = self.image_label.zoom_level
+        pan_x = self.image_label.pan_offset_x
+        pan_y = self.image_label.pan_offset_y
+        
+        base_scaled = self.original_pixmap.scaled(
             self.image_label.size(), 
             Qt.KeepAspectRatio, 
             Qt.SmoothTransformation
         )
-        canvas = scaled.copy()
+        
+        zoomed_w = int(base_scaled.width() * zoom)
+        zoomed_h = int(base_scaled.height() * zoom)
+        zoomed = self.original_pixmap.scaled(zoomed_w, zoomed_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        
+        canvas = QPixmap(self.image_label.size())
+        canvas.fill(QColor(COLORS['canvas']))
+        
         painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        draw_x = int(self.offset_x + pan_x)
+        draw_y = int(self.offset_y + pan_y)
+        painter.drawPixmap(draw_x, draw_y, zoomed)
+        
+        orig_w, orig_h = self.original_pixmap.width(), self.original_pixmap.height()
+        effective_scale_x = self.scale_factor_x * zoom
+        effective_scale_y = self.scale_factor_y * zoom
+        adj_offset_x = self.offset_x + pan_x
+        adj_offset_y = self.offset_y + pan_y
+        
+        self._draw_existing_boxes_zoomed(painter, orig_w, orig_h, effective_scale_x, effective_scale_y, adj_offset_x, adj_offset_y)
+        self._draw_existing_masks_zoomed(painter, orig_w, orig_h, effective_scale_x, effective_scale_y, adj_offset_x, adj_offset_y)
+        
+        temp_rect = QRect(
+            int(min(start.x(), end.x())), int(min(start.y(), end.y())), 
+            int(abs(end.x() - start.x())), int(abs(end.y() - start.y()))
+        )
+        
+        painter.fillRect(temp_rect, QColor(128, 128, 128, 240))
+        
+        pen = QPen(QColor(200, 200, 200), 2, Qt.DashLine)
+        painter.setPen(pen)
+        painter.drawRect(temp_rect)
+        
+        painter.setPen(QColor(255, 255, 255))
+        painter.setFont(QFont("Consolas", 9, QFont.Bold))
+        painter.drawText(int(min(start.x(), end.x())) + 4, int(min(start.y(), end.y())) + 14, "MASK")
+        
+        painter.end()
+        self.image_label.setPixmap(canvas)
+    
+    def finalize_new_mask(self, start, end):
+        if not self.original_pixmap:
+            return
+        
+        zoom = self.image_label.zoom_level
+        pan_x = self.image_label.pan_offset_x
+        pan_y = self.image_label.pan_offset_y
+        
+        adj_offset_x = self.offset_x + pan_x
+        adj_offset_y = self.offset_y + pan_y
+        
+        x1 = (start.x() - adj_offset_x) / zoom
+        y1 = (start.y() - adj_offset_y) / zoom
+        x2 = (end.x() - adj_offset_x) / zoom
+        y2 = (end.y() - adj_offset_y) / zoom
+        
+        if abs(x2 - x1) < 10 or abs(y2 - y1) < 10:
+            self.draw_boxes()
+            return
         
         orig_w, orig_h = self.original_pixmap.width(), self.original_pixmap.height()
         
-        # Draw existing boxes
+        px_x1, px_y1 = min(x1, x2) / self.scale_factor_x, min(y1, y2) / self.scale_factor_y
+        px_x2, px_y2 = max(x1, x2) / self.scale_factor_x, max(y1, y2) / self.scale_factor_y
+        
+        px_x1 = max(0, min(px_x1, orig_w))
+        px_y1 = max(0, min(px_y1, orig_h))
+        px_x2 = max(0, min(px_x2, orig_w))
+        px_y2 = max(0, min(px_y2, orig_h))
+        
+        cx = (px_x1 + px_x2) / 2 / orig_w
+        cy = (px_y1 + px_y2) / 2 / orig_h
+        w = (px_x2 - px_x1) / orig_w
+        h = (px_y2 - px_y1) / orig_h
+        
+        new_mask = {'x': cx, 'y': cy, 'w': w, 'h': h}
+        self.mask_rectangles.append(new_mask)
+        self.update_mask_list()
+        self.draw_boxes()
+    
+    def _draw_existing_masks(self, painter, orig_w, orig_h):
+        for i, mask in enumerate(self.mask_rectangles):
+            cx, cy, w, h = mask['x'], mask['y'], mask['w'], mask['h']
+            x1 = (cx - w/2) * orig_w * self.scale_factor_x
+            y1 = (cy - h/2) * orig_h * self.scale_factor_y
+            w_px = w * orig_w * self.scale_factor_x
+            h_px = h * orig_h * self.scale_factor_y
+            
+            rect = QRect(int(x1), int(y1), int(w_px), int(h_px))
+            
+            painter.fillRect(rect, QColor(128, 128, 128, 255))
+            
+            if i == self.selected_mask_index:
+                pen = QPen(QColor(255, 100, 100), 3)
+            else:
+                pen = QPen(QColor(100, 100, 100), 2)
+            painter.setPen(pen)
+            painter.drawRect(rect)
+    
+    def _draw_existing_masks_zoomed(self, painter, orig_w, orig_h, scale_x, scale_y, offset_x, offset_y):
+        for i, mask in enumerate(self.mask_rectangles):
+            cx, cy, w, h = mask['x'], mask['y'], mask['w'], mask['h']
+            x1 = (cx - w/2) * orig_w * scale_x + offset_x
+            y1 = (cy - h/2) * orig_h * scale_y + offset_y
+            w_px = w * orig_w * scale_x
+            h_px = h * orig_h * scale_y
+            
+            rect = QRect(int(x1), int(y1), int(w_px), int(h_px))
+            
+            painter.fillRect(rect, QColor(128, 128, 128, 255))
+            
+            if i == self.selected_mask_index:
+                pen = QPen(QColor(255, 100, 100), 3)
+            else:
+                pen = QPen(QColor(100, 100, 100), 2)
+            painter.setPen(pen)
+            painter.drawRect(rect)
+    
+    def _draw_existing_boxes(self, painter, orig_w, orig_h):
         boxes = self.annotation_mgr.get_boxes()
         selected_idx = self.annotation_mgr.selected_index
         for i, box in enumerate(boxes):
@@ -647,22 +1043,115 @@ class MainWindow(QMainWindow):
             if rect:
                 pen = QPen(QColor(0, 200, 255), 2) if i == selected_idx else QPen(QColor(255, 80, 80), 2)
                 painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(rect)
+    
+    def _draw_existing_boxes_zoomed(self, painter, orig_w, orig_h, scale_x, scale_y, offset_x, offset_y):
+        boxes = self.annotation_mgr.get_boxes()
+        selected_idx = self.annotation_mgr.selected_index
+        for i, box in enumerate(boxes):
+            rect = BoxGeometry.get_box_rect_px(box, orig_w, orig_h, scale_x, scale_y)
+            if rect:
+                rect.translate(int(offset_x), int(offset_y))
+                pen = QPen(QColor(0, 200, 255), 2) if i == selected_idx else QPen(QColor(255, 80, 80), 2)
+                painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(rect)
+    
+    def apply_masks_to_image(self):
+        if not self.current_image_path or not self.mask_rectangles:
+            return
+        
+        import cv2
+        
+        try:
+            img = cv2.imread(self.current_image_path)
+            if img is None:
+                return
+            
+            h, w = img.shape[:2]
+            
+            for mask in self.mask_rectangles:
+                cx, cy, mw, mh = mask['x'], mask['y'], mask['w'], mask['h']
+                x1 = int((cx - mw/2) * w)
+                y1 = int((cy - mh/2) * h)
+                x2 = int((cx + mw/2) * w)
+                y2 = int((cy + mh/2) * h)
+                
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
+                
+                cv2.rectangle(img, (x1, y1), (x2, y2), (128, 128, 128), -1)
+            
+            cv2.imwrite(self.current_image_path, img)
+            self.original_pixmap = QPixmap(self.current_image_path)
+            
+        except Exception as e:
+            print(f"Error applying masks: {e}")
+            QMessageBox.warning(self, "Warning", f"Failed to apply masks to image: {e}")
+    
+    def update_default_class(self, value):
+        self.default_class = value
+    
+    def draw_temp_box(self, start, end):
+        if not self.original_pixmap:
+            return
+        
+        zoom = self.image_label.zoom_level
+        pan_x = self.image_label.pan_offset_x
+        pan_y = self.image_label.pan_offset_y
+        
+        base_scaled = self.original_pixmap.scaled(
+            self.image_label.size(), 
+            Qt.KeepAspectRatio, 
+            Qt.SmoothTransformation
+        )
+        
+        zoomed_w = int(base_scaled.width() * zoom)
+        zoomed_h = int(base_scaled.height() * zoom)
+        zoomed = self.original_pixmap.scaled(zoomed_w, zoomed_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        
+        canvas = QPixmap(self.image_label.size())
+        canvas.fill(QColor(COLORS['canvas']))
+        
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        draw_x = int(self.offset_x + pan_x)
+        draw_y = int(self.offset_y + pan_y)
+        painter.drawPixmap(draw_x, draw_y, zoomed)
+        
+        orig_w, orig_h = self.original_pixmap.width(), self.original_pixmap.height()
+        effective_scale_x = self.scale_factor_x * zoom
+        effective_scale_y = self.scale_factor_y * zoom
+        adj_offset_x = self.offset_x + pan_x
+        adj_offset_y = self.offset_y + pan_y
+        
+        boxes = self.annotation_mgr.get_boxes()
+        selected_idx = self.annotation_mgr.selected_index
+        for i, box in enumerate(boxes):
+            rect = BoxGeometry.get_box_rect_px(box, orig_w, orig_h, effective_scale_x, effective_scale_y)
+            if rect:
+                rect.translate(int(adj_offset_x), int(adj_offset_y))
+                pen = QPen(QColor(0, 200, 255), 2) if i == selected_idx else QPen(QColor(255, 80, 80), 2)
+                painter.setPen(pen)
                 painter.drawRect(rect)
         
-        # Draw temp box
+        self._draw_existing_masks_zoomed(painter, orig_w, orig_h, effective_scale_x, effective_scale_y, adj_offset_x, adj_offset_y)
+        
         pen = QPen(QColor(0, 180, 255), 2, Qt.DashLine)
         painter.setPen(pen)
         
-        x1, y1 = start.x() - self.offset_x, start.y() - self.offset_y
-        x2, y2 = end.x() - self.offset_x, end.y() - self.offset_y
-        
-        rect = QRect(int(min(x1, x2)), int(min(y1, y2)), int(abs(x2 - x1)), int(abs(y2 - y1)))
-        painter.drawRect(rect)
+        temp_rect = QRect(
+            int(min(start.x(), end.x())), int(min(start.y(), end.y())), 
+            int(abs(end.x() - start.x())), int(abs(end.y() - start.y()))
+        )
+        painter.drawRect(temp_rect)
         
         painter.setPen(QColor(0, 200, 255))
         painter.setFont(QFont("Consolas", 9, QFont.Bold))
         painter.drawText(
-            int(min(x1, x2)), int(min(y1, y2)) - 4, 
+            int(min(start.x(), end.x())), int(min(start.y(), end.y())) - 4, 
             f"New: {self.get_class_name(self.default_class)}"
         )
         
@@ -670,12 +1159,20 @@ class MainWindow(QMainWindow):
         self.image_label.setPixmap(canvas)
     
     def finalize_new_box(self, start, end):
-        """Finalize newly drawn box."""
         if not self.original_pixmap:
             return
         
-        x1, y1 = start.x() - self.offset_x, start.y() - self.offset_y
-        x2, y2 = end.x() - self.offset_x, end.y() - self.offset_y
+        zoom = self.image_label.zoom_level
+        pan_x = self.image_label.pan_offset_x
+        pan_y = self.image_label.pan_offset_y
+        
+        adj_offset_x = self.offset_x + pan_x
+        adj_offset_y = self.offset_y + pan_y
+        
+        x1 = (start.x() - adj_offset_x) / zoom
+        y1 = (start.y() - adj_offset_y) / zoom
+        x2 = (end.x() - adj_offset_x) / zoom
+        y2 = (end.y() - adj_offset_y) / zoom
         
         if abs(x2 - x1) < 5 or abs(y2 - y1) < 5:
             self.draw_boxes()
@@ -703,14 +1200,20 @@ class MainWindow(QMainWindow):
         self.annotation_mgr.select_box(idx)
         self.box_list.setCurrentRow(idx)
     
-    # ==================== BOX SELECTION & EDITING ====================
-    
     def select_box_at(self, mouse_x, mouse_y):
-        """Select box at mouse position."""
         if not self.original_pixmap:
             return
         
-        real_x, real_y = mouse_x - self.offset_x, mouse_y - self.offset_y
+        zoom = self.image_label.zoom_level
+        pan_x = self.image_label.pan_offset_x
+        pan_y = self.image_label.pan_offset_y
+        
+        adj_offset_x = self.offset_x + pan_x
+        adj_offset_y = self.offset_y + pan_y
+        
+        real_x = (mouse_x - adj_offset_x) / zoom
+        real_y = (mouse_y - adj_offset_y) / zoom
+        
         orig_w, orig_h = self.original_pixmap.width(), self.original_pixmap.height()
         
         selected_idx = -1
@@ -724,13 +1227,14 @@ class MainWindow(QMainWindow):
                 selected_idx = i
         
         self.annotation_mgr.select_box(selected_idx)
+        
         if selected_idx != -1:
+            self.selected_mask_index = -1
             self.box_list.setCurrentRow(selected_idx)
             self.update_class_selector(boxes[selected_idx]['class'])
         self.draw_boxes()
     
     def update_list_widget(self):
-        """Update the box list widget."""
         self.box_list.clear()
         boxes = self.annotation_mgr.get_boxes()
         sorted_indices = self.annotation_mgr.get_sorted_indices()
@@ -742,15 +1246,14 @@ class MainWindow(QMainWindow):
             )
     
     def list_selection_changed(self, row):
-        """Handle list selection change."""
         boxes = self.annotation_mgr.get_boxes()
         if 0 <= row < len(boxes):
             self.annotation_mgr.select_box(row)
+            self.selected_mask_index = -1
             self.update_class_selector(boxes[row]['class'])
             self.draw_boxes()
     
     def update_class_selector(self, class_id):
-        """Update class selector to show current class."""
         if self.class_names:
             for i in range(self.combo_class.count()):
                 if self.combo_class.itemData(i) == class_id:
@@ -764,7 +1267,6 @@ class MainWindow(QMainWindow):
             self.spin_class.blockSignals(False)
     
     def update_current_box_class(self, index):
-        """Update class of currently selected box (from combo)."""
         selected_idx = self.annotation_mgr.selected_index
         if selected_idx >= 0 and self.class_names:
             self.state_mgr.save_state(self.annotation_mgr.get_boxes())
@@ -775,7 +1277,6 @@ class MainWindow(QMainWindow):
             self.draw_boxes()
     
     def update_current_box_class_spin(self):
-        """Update class of currently selected box (from spinbox)."""
         selected_idx = self.annotation_mgr.selected_index
         if selected_idx >= 0 and not self.class_names:
             self.state_mgr.save_state(self.annotation_mgr.get_boxes())
@@ -785,7 +1286,6 @@ class MainWindow(QMainWindow):
             self.draw_boxes()
     
     def delete_current_box(self):
-        """Delete currently selected box."""
         selected_idx = self.annotation_mgr.selected_index
         if selected_idx >= 0:
             self.state_mgr.save_state(self.annotation_mgr.get_boxes())
@@ -794,7 +1294,6 @@ class MainWindow(QMainWindow):
             self.draw_boxes()
     
     def sort_boxes_left_to_right(self):
-        """Sort boxes by x coordinate."""
         boxes = self.annotation_mgr.get_boxes()
         if not boxes:
             return
@@ -803,10 +1302,7 @@ class MainWindow(QMainWindow):
         self.update_list_widget()
         self.draw_boxes()
     
-    # ==================== UNDO / REDO ====================
-    
     def undo(self):
-        """Undo last operation."""
         boxes = self.annotation_mgr.get_boxes()
         prev_state = self.state_mgr.undo(boxes)
         if prev_state is not None:
@@ -815,7 +1311,6 @@ class MainWindow(QMainWindow):
             self.draw_boxes()
     
     def redo(self):
-        """Redo last undone operation."""
         boxes = self.annotation_mgr.get_boxes()
         next_state = self.state_mgr.redo(boxes)
         if next_state is not None:
@@ -823,18 +1318,22 @@ class MainWindow(QMainWindow):
             self.update_list_widget()
             self.draw_boxes()
     
-    # ==================== SAVE ====================
-    
     def save_annotation(self, go_next=True):
-        """Save current annotations."""
         if not self.current_image_path:
             return
+        
+        masks_applied = False
+        if self.mask_rectangles:
+            self.apply_masks_to_image()
+            masks_applied = True
+            self.mask_rectangles = []
+            self.update_mask_list()
         
         txt_path = os.path.splitext(self.current_image_path)[0] + ".txt"
         boxes = self.annotation_mgr.get_boxes()
         self.file_mgr.save_annotations(txt_path, boxes)
         
-        self.lbl_info.setText("Saved")
+        self.lbl_info.setText("Saved" + (" (masks applied)" if masks_applied else ""))
         self.update_progress()
         QApplication.processEvents()
         
@@ -842,36 +1341,29 @@ class MainWindow(QMainWindow):
             self.current_index += 1
             self.load_image()
     
-    # ==================== NAVIGATION ====================
-    
     def next_image(self):
-        """Go to next image."""
         self.save_annotation(go_next=False)
         if self.current_index < len(self.image_list) - 1:
             self.current_index += 1
             self.load_image()
     
     def prev_image(self):
-        """Go to previous image."""
         if self.current_index > 0:
             self.current_index -= 1
             self.load_image()
     
     def skip_image(self):
-        """Skip to next image without saving."""
         if self.current_index < len(self.image_list) - 1:
             self.current_index += 1
             self.load_image()
     
     def find_first_unannotated(self):
-        """Find first unannotated image."""
         for i, img in enumerate(self.image_list):
             if not self.file_mgr.annotation_exists(self.image_folder, img):
                 return i
         return -1
     
     def find_next_unannotated(self, start_from=None):
-        """Find next unannotated image."""
         start = start_from if start_from is not None else self.current_index + 1
         
         for i in range(start, len(self.image_list)):
@@ -883,7 +1375,6 @@ class MainWindow(QMainWindow):
         return -1
     
     def goto_next_unannotated(self):
-        """Go to next unannotated image."""
         if not self.image_list:
             return
         next_idx = self.find_next_unannotated()
@@ -894,7 +1385,6 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Complete", "All images have been annotated.")
     
     def delete_current_image(self):
-        """Delete current image and annotation."""
         if not self.current_image_path or not self.image_list:
             return
         
@@ -932,10 +1422,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
     
-    # ==================== KEYBOARD SHORTCUTS ====================
-    
     def keyPressEvent(self, event):
-        """Handle keyboard shortcuts."""
         if event.modifiers() == Qt.ControlModifier:
             if event.key() == Qt.Key_Z:
                 self.undo()
@@ -956,6 +1443,10 @@ class MainWindow(QMainWindow):
             self.save_annotation()
         elif key == Qt.Key_W:
             self.toggle_draw_mode()
+        elif key == Qt.Key_M:
+            self.toggle_mask_mode()
+        elif key == Qt.Key_R:
+            self.reset_view()
         elif key == Qt.Key_Q:
             self.skip_image()
         elif key == Qt.Key_N:
@@ -965,11 +1456,17 @@ class MainWindow(QMainWindow):
         elif key == Qt.Key_Escape:
             if self.draw_mode:
                 self.toggle_draw_mode()
+            elif self.mask_mode:
+                self.toggle_mask_mode()
             else:
                 self.annotation_mgr.deselect()
+                self.selected_mask_index = -1
                 self.draw_boxes()
         elif key == Qt.Key_Delete:
-            self.delete_current_box()
+            if self.selected_mask_index >= 0:
+                self.delete_selected_mask()
+            else:
+                self.delete_current_box()
         elif Qt.Key_1 <= key <= Qt.Key_9:
             selected_idx = self.annotation_mgr.selected_index
             if selected_idx >= 0:

@@ -1,7 +1,7 @@
 """Configuration package for Label Mender application."""
 
 # Centralized version - update this for new releases
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 VERSION = f"v{__version__}"
 
 from .constants import (

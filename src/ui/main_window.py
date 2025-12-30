@@ -638,9 +638,13 @@ class MainWindow(QMainWindow):
             self.progress_bar.setMaximum(len(self.image_list))
             self.update_progress()
             
-            first_unannotated = self.find_first_unannotated()
-            self.current_index = first_unannotated if first_unannotated >= 0 else 0
+            self.current_index = 0
             self.load_image()
+            
+            labeled_count = sum(1 for img in self.image_list if self.file_mgr.annotation_exists(self.image_folder, img))
+            if labeled_count > 0:
+                QMessageBox.information(self, "Folder Loaded", 
+                    f"Found {len(self.image_list)} images\n{labeled_count} have existing labels\n{len(self.image_list) - labeled_count} need annotation")
     
     def update_progress(self):
         if not self.image_list:
@@ -676,10 +680,12 @@ class MainWindow(QMainWindow):
         if os.path.exists(txt_path):
             boxes = self.file_mgr.load_annotations(txt_path)
             self.annotation_mgr.set_boxes(boxes)
-            if boxes:
-                self.lbl_info.setText(f"{filename}  ({self.current_index + 1}/{len(self.image_list)}) - {len(boxes)} labels loaded")
+            self.lbl_info.setText(f"{filename}  ({self.current_index + 1}/{len(self.image_list)}) - ✓ {len(boxes)} labels")
+            self.lbl_info.setStyleSheet(STATUS_SUCCESS_STYLE)
         elif self.model_mgr.is_loaded():
             self.run_inference()
+        else:
+            self.lbl_info.setStyleSheet(INFO_LABEL_STYLE)
         
         self.mask_rectangles = []
         self.selected_mask_index = -1

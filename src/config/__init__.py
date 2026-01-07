@@ -1,7 +1,7 @@
 """Configuration package for Label Mender application."""
 
 # Centralized version - update this for new releases
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 VERSION = f"v{__version__}"
 
 from .constants import (
@@ -10,6 +10,7 @@ from .constants import (
     HandlePosition,
     DEFAULT_MODEL_PATH,
     VALID_IMAGE_EXTENSIONS,
+    VALID_VIDEO_EXTENSIONS,
     DEFAULT_CONFIDENCE,
     MIN_BOX_SIZE,
     MAX_UNDO_STACK_SIZE
@@ -35,6 +36,7 @@ __all__ = [
     'STYLESHEET',
     'DEFAULT_MODEL_PATH',
     'VALID_IMAGE_EXTENSIONS',
+    'VALID_VIDEO_EXTENSIONS',
     'DEFAULT_CONFIDENCE',
     'MIN_BOX_SIZE',
     'MAX_UNDO_STACK_SIZE',

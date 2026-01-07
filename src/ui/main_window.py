@@ -1,20 +1,219 @@
 """Main window for the Label Mender application."""
 
 import os
+import cv2
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QLabel, QFileDialog, QListWidget, 
                              QSpinBox, QMessageBox, QSlider, QComboBox, 
                              QProgressBar, QGroupBox, QInputDialog, QApplication,
-                             QSizePolicy, QTabWidget, QScrollArea, QFrame)
+                             QSizePolicy, QTabWidget, QScrollArea, QFrame, QDialog,
+                             QFormLayout, QDialogButtonBox)
 from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QFont, QBrush, QIcon
 from PyQt5.QtCore import Qt, QRect
 
-from ..config import COLORS, STYLESHEET, DEFAULT_MODEL_PATH, VALID_IMAGE_EXTENSIONS, DEFAULT_CONFIDENCE, HANDLE_SIZE, VERSION
+from ..config import COLORS, STYLESHEET, DEFAULT_MODEL_PATH, VALID_IMAGE_EXTENSIONS, VALID_VIDEO_EXTENSIONS, DEFAULT_CONFIDENCE, HANDLE_SIZE, VERSION
 from ..config.styles import (PANEL_STYLE, CANVAS_STYLE, INFO_LABEL_STYLE, 
                              STATUS_SUCCESS_STYLE, STATUS_ERROR_STYLE, HINT_LABEL_STYLE)
 from ..core import ModelManager, AnnotationManager, StateManager
 from ..utils import BoxGeometry, FileManager
 from .image_canvas import ImageCanvas
+
+
+class VideoFrameDialog(QDialog):
+    def __init__(self, video_path, parent=None):
+        super().__init__(parent)
+        self.video_path = video_path
+        self.setWindowTitle("Extract Video Frames")
+        self.setMinimumWidth(500)
+        self.total_frames = 0
+        self.fps = 0
+        self.setup_ui()
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {COLORS['background']};
+            }}
+            QLabel {{
+                color: {COLORS['text']};
+                font-size: 11px;
+            }}
+            QSpinBox {{
+                background-color: {COLORS['surface']};
+                color: {COLORS['text']};
+                border: 1px solid {COLORS['border']};
+                padding: 4px;
+                border-radius: 3px;
+            }}
+            QSpinBox::up-button, QSpinBox::down-button {{
+                background-color: {COLORS['surface_elevated']};
+                border: 1px solid {COLORS['border']};
+            }}
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+                background-color: {COLORS['accent']};
+            }}
+            QPushButton {{
+                background-color: {COLORS['surface_elevated']};
+                color: {COLORS['text']};
+                border: 1px solid {COLORS['border']};
+                padding: 6px 12px;
+                border-radius: 3px;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['accent']};
+                color: white;
+            }}
+            QDialogButtonBox {{
+                dialogbuttonbox-buttons-have-icons: 0;
+            }}
+        """)
+    
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+        
+        cap = cv2.VideoCapture(self.video_path, cv2.CAP_ANY)
+        if cap.isOpened():
+            self.total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+        else:
+            self.total_frames = 0
+            self.fps = 30
+            width = 0
+            height = 0
+        
+        duration = self.total_frames / self.fps if self.fps > 0 else 0
+        
+        title = QLabel("Video Information")
+        title.setStyleSheet(f"color: {COLORS['text']}; font-size: 13px; font-weight: bold; padding-bottom: 8px;")
+        layout.addWidget(title)
+        
+        info_group = QGroupBox()
+        info_group.setStyleSheet(f"""
+            QGroupBox {{
+                background-color: {COLORS['surface']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 4px;
+                padding: 10px;
+                margin-top: 0px;
+            }}
+        """)
+        info_layout = QVBoxLayout(info_group)
+        info_layout.setSpacing(4)
+        
+        info_text = f"<b>File:</b> {os.path.basename(self.video_path)}<br>"
+        info_text += f"<b>Resolution:</b> {width}x{height}<br>"
+        info_text += f"<b>Total frames:</b> {self.total_frames}<br>"
+        info_text += f"<b>FPS:</b> {self.fps:.2f}<br>"
+        info_text += f"<b>Duration:</b> {duration:.1f}s"
+        
+        info_label = QLabel(info_text)
+        info_label.setStyleSheet(f"color: {COLORS['text']}; padding: 4px; line-height: 1.4;")
+        info_layout.addWidget(info_label)
+        layout.addWidget(info_group)
+        
+        settings_title = QLabel("Extraction Settings")
+        settings_title.setStyleSheet(f"color: {COLORS['text']}; font-size: 13px; font-weight: bold; padding-top: 12px; padding-bottom: 8px;")
+        layout.addWidget(settings_title)
+        
+        form_layout = QFormLayout()
+        form_layout.setSpacing(8)
+        form_layout.setLabelAlignment(Qt.AlignRight)
+        
+        interval_label = QLabel("Frame Interval:")
+        interval_label.setToolTip("Extract every Nth frame\nExample: 30 = 1 frame per second at 30fps")
+        self.spin_interval = QSpinBox()
+        self.spin_interval.setRange(1, 1000)
+        default_interval = max(1, int(self.fps)) if self.fps > 0 else 30
+        self.spin_interval.setValue(default_interval)
+        self.spin_interval.setToolTip("Extract every Nth frame\nExample: 30 = 1 frame per second at 30fps")
+        self.spin_interval.valueChanged.connect(self.update_estimate)
+        form_layout.addRow(interval_label, self.spin_interval)
+        
+        max_label = QLabel("Max Frames:")
+        max_label.setToolTip("Maximum frames to extract (0 = all)")
+        self.spin_max_frames = QSpinBox()
+        self.spin_max_frames.setRange(0, 100000)
+        self.spin_max_frames.setValue(0)
+        self.spin_max_frames.setToolTip("Maximum frames to extract (0 = all)")
+        self.spin_max_frames.valueChanged.connect(self.update_estimate)
+        form_layout.addRow(max_label, self.spin_max_frames)
+        
+        self.lbl_estimate = QLabel("")
+        self.lbl_estimate.setStyleSheet(f"color: {COLORS['accent']}; font-weight: bold; font-size: 12px;")
+        form_layout.addRow("Estimated output:", self.lbl_estimate)
+        self.update_estimate()
+        
+        layout.addLayout(form_layout)
+        
+        output_label = QLabel("Output Folder")
+        output_label.setStyleSheet(f"color: {COLORS['text']}; font-size: 13px; font-weight: bold; padding-top: 12px; padding-bottom: 8px;")
+        layout.addWidget(output_label)
+        
+        video_dir = os.path.dirname(self.video_path)
+        video_name = os.path.splitext(os.path.basename(self.video_path))[0]
+        video_name_safe = "".join(c if c.isalnum() or c in "._- " else "_" for c in video_name)
+        default_output = os.path.join(video_dir, f"{video_name_safe}_extracts")
+        
+        output_layout = QHBoxLayout()
+        self.lbl_output = QLabel(default_output)
+        self.lbl_output.setStyleSheet(f"""
+            color: {COLORS['text']};
+            padding: 6px;
+            background: {COLORS['surface']};
+            border: 1px solid {COLORS['border']};
+            border-radius: 3px;
+        """)
+        self.lbl_output.setWordWrap(True)
+        self.output_folder = default_output
+        
+        btn_browse = QPushButton("Browse...")
+        btn_browse.clicked.connect(self.browse_output)
+        output_layout.addWidget(self.lbl_output, 1)
+        output_layout.addWidget(btn_browse)
+        layout.addLayout(output_layout)
+        
+        layout.addStretch()
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Extract")
+        buttons.button(QDialogButtonBox.Ok).setStyleSheet(f"""
+            QPushButton {{
+                background-color: {COLORS['accent']};
+                color: white;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['accent_hover']};
+            }}
+        """)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def update_estimate(self):
+        interval = self.spin_interval.value()
+        max_frames = self.spin_max_frames.value()
+        
+        if self.total_frames > 0 and interval > 0:
+            estimated = self.total_frames // interval
+            if max_frames > 0:
+                estimated = min(estimated, max_frames)
+            self.lbl_estimate.setText(f"~{estimated} frames")
+        else:
+            self.lbl_estimate.setText("Unknown")
+    
+    def browse_output(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        if folder:
+            self.output_folder = folder
+            self.lbl_output.setText(folder)
+    
+    def get_settings(self):
+        return self.output_folder, self.spin_interval.value(), self.spin_max_frames.value()
 
 
 class MainWindow(QMainWindow):
@@ -185,7 +384,11 @@ class MainWindow(QMainWindow):
         classes_row = QHBoxLayout()
         self.btn_load_classes = QPushButton("Load Classes")
         self.btn_load_classes.clicked.connect(self.load_class_names)
+        self.btn_import_classes = QPushButton("Import .txt")
+        self.btn_import_classes.setToolTip("Import classes from classes.txt file")
+        self.btn_import_classes.clicked.connect(self.import_classes_file)
         classes_row.addWidget(self.btn_load_classes)
+        classes_row.addWidget(self.btn_import_classes)
         config_layout.addLayout(classes_row)
         
         self.lbl_model_status = QLabel("Model: Not loaded")
@@ -200,6 +403,13 @@ class MainWindow(QMainWindow):
         folder_row.addWidget(self.btn_open_dir)
         folder_row.addWidget(self.btn_add_class)
         config_layout.addLayout(folder_row)
+        
+        video_row = QHBoxLayout()
+        self.btn_open_video = QPushButton("Open Video")
+        self.btn_open_video.setToolTip("Extract frames from video file (MKV, MP4, etc.)")
+        self.btn_open_video.clicked.connect(self.open_video_file)
+        video_row.addWidget(self.btn_open_video)
+        config_layout.addLayout(video_row)
         
         self.progress_bar = QProgressBar()
         self.progress_bar.setFormat("%v / %m  (%p%)")
@@ -269,6 +479,13 @@ class MainWindow(QMainWindow):
         self.spin_new_class.valueChanged.connect(self.update_default_class)
         new_class_row.addWidget(self.spin_new_class)
         edit_layout.addLayout(new_class_row)
+        
+        class_actions_row = QHBoxLayout()
+        self.btn_rename_class = QPushButton("Rename")
+        self.btn_rename_class.setToolTip("Rename selected class")
+        self.btn_rename_class.clicked.connect(self.rename_class)
+        class_actions_row.addWidget(self.btn_rename_class)
+        edit_layout.addLayout(class_actions_row)
         
         self.btn_delete_box = QPushButton("Delete [Del]")
         self.btn_delete_box.setToolTip("Delete selected box")
@@ -591,6 +808,73 @@ class MainWindow(QMainWindow):
             self.save_classes_to_file()
             QMessageBox.information(self, "Success", f"Added class {new_id}: {name}")
     
+    def import_classes_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Classes File", "", 
+            "Text Files (*.txt);;All Files (*)"
+        )
+        if not path:
+            return
+        
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            imported_classes = {}
+            for idx, line in enumerate(lines):
+                class_name = line.strip()
+                if class_name:
+                    imported_classes[idx] = class_name
+            
+            if not imported_classes:
+                QMessageBox.warning(self, "Warning", "No classes found in file")
+                return
+            
+            self.class_names = imported_classes
+            self.class_file_path = path
+            self.update_class_combo()
+            self.update_list_widget()
+            
+            QMessageBox.information(self, "Success", 
+                f"Imported {len(imported_classes)} classes from:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to import classes:\n{str(e)}")
+    
+    def rename_class(self):
+        if not self.class_names:
+            QMessageBox.warning(self, "Warning", "No classes loaded")
+            return
+        
+        current_idx = self.combo_class.currentIndex()
+        if current_idx < 0 or current_idx >= len(self.class_names):
+            QMessageBox.warning(self, "Warning", "Please select a class to rename")
+            return
+        
+        class_id = list(self.class_names.keys())[current_idx]
+        old_name = self.class_names[class_id]
+        
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Class", 
+            f"Rename class {class_id}: {old_name}\n\nEnter new name:",
+            text=old_name
+        )
+        
+        if ok and new_name.strip():
+            new_name = new_name.strip()
+            
+            if new_name == old_name:
+                return
+            
+            self.class_names[class_id] = new_name
+            self.update_class_combo()
+            self.update_list_widget()
+            self.draw_boxes()
+            
+            self.save_classes_to_file()
+            
+            QMessageBox.information(self, "Success", 
+                f"Class {class_id} renamed:\n{old_name} → {new_name}")
+    
     def save_classes_to_file(self):
         if not self.class_file_path:
             path, _ = QFileDialog.getSaveFileName(
@@ -645,6 +929,186 @@ class MainWindow(QMainWindow):
             if labeled_count > 0:
                 QMessageBox.information(self, "Folder Loaded", 
                     f"Found {len(self.image_list)} images\n{labeled_count} have existing labels\n{len(self.image_list) - labeled_count} need annotation")
+    
+    def open_video_file(self):
+        video_filter = "Video Files (" + " ".join(f"*{ext}" for ext in VALID_VIDEO_EXTENSIONS) + ")"
+        video_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Video File", "", video_filter
+        )
+        if not video_path:
+            return
+        
+        dialog = VideoFrameDialog(video_path, self)
+        if dialog.exec_() == QDialog.Accepted:
+            output_folder, frame_interval, max_frames = dialog.get_settings()
+            self.extract_video_frames(video_path, output_folder, frame_interval, max_frames)
+    
+    def extract_video_frames(self, video_path, output_folder, frame_interval, max_frames):
+        os.makedirs(output_folder, exist_ok=True)
+        
+        cap = cv2.VideoCapture(video_path, cv2.CAP_ANY)
+        if not cap.isOpened():
+            QMessageBox.critical(self, "Error", f"Could not open video:\n{video_path}\n\nMake sure the video file is valid and codecs are installed.")
+            return
+        
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        if total_frames <= 0 or width <= 0 or height <= 0:
+            QMessageBox.critical(self, "Error", f"Invalid video properties:\nFrames: {total_frames}, Size: {width}x{height}\n\nTry a different video file.")
+            cap.release()
+            return
+        
+        video_name = os.path.splitext(os.path.basename(video_path))[0]
+        video_name = self._sanitize_filename(video_name)
+        
+        expected_frames = total_frames // frame_interval if frame_interval > 0 else total_frames
+        if max_frames > 0:
+            expected_frames = min(max_frames, expected_frames)
+        
+        progress_label = QLabel(f"Processing video frames...\nSaved: 0", self)
+        progress_label.setStyleSheet(f"""
+            QLabel {{
+                background-color: {COLORS['surface']};
+                color: {COLORS['text']};
+                border: 2px solid {COLORS['border']};
+                border-radius: 5px;
+                padding: 20px;
+                font-size: 12px;
+                font-weight: bold;
+            }}
+        """)
+        progress_label.setAlignment(Qt.AlignCenter)
+        progress_label.setMinimumSize(400, 100)
+        progress_label.setWindowModality(Qt.WindowModal)
+        progress_label.setWindowFlags(Qt.Dialog | Qt.WindowTitleHint | Qt.CustomizeWindowHint)
+        progress_label.setWindowTitle("Extracting Frames")
+        progress_label.show()
+        QApplication.processEvents()
+        
+        frame_count = 0
+        saved_count = 0
+        skipped_count = 0
+        errors = []
+        actual_read_frames = 0
+        
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                actual_read_frames += 1
+                
+                if frame_count % frame_interval == 0:
+                    frame_filename = f"{video_name}_frame_{saved_count:06d}.jpg"
+                    frame_path = os.path.join(output_folder, frame_filename)
+                    
+                    try:
+                        if frame is None or frame.size == 0:
+                            errors.append(f"Empty frame at {frame_count}")
+                            skipped_count += 1
+                        else:
+                            success, encoded = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                            if success and encoded is not None:
+                                with open(frame_path, 'wb') as f:
+                                    f.write(encoded.tobytes())
+                                saved_count += 1
+                            else:
+                                errors.append(f"Encode failed at frame {frame_count}")
+                                skipped_count += 1
+                    except Exception as e:
+                        errors.append(f"Error at frame {frame_count}: {str(e)[:30]}")
+                        skipped_count += 1
+                    
+                    if saved_count % 5 == 0 or skipped_count > 0:
+                        status_text = f"Processing video frames...\n"
+                        status_text += f"Read: {actual_read_frames} / {total_frames}\n"
+                        status_text += f"Saved: {saved_count}"
+                        if skipped_count > 0:
+                            status_text += f" (Skipped: {skipped_count})"
+                        progress_label.setText(status_text)
+                        QApplication.processEvents()
+                    
+                    if max_frames > 0 and saved_count >= max_frames:
+                        break
+                
+                frame_count += 1
+        finally:
+            cap.release()
+            progress_label.close()
+            progress_label.deleteLater()
+            QApplication.processEvents()
+        
+        if saved_count == 0:
+            error_msg = "No frames were extracted!"
+            if errors:
+                error_msg += f"\n\nErrors:\n" + "\n".join(errors[:5])
+            QMessageBox.critical(self, "Extraction Failed", error_msg)
+            return
+        
+        completion_msg = "Extraction Complete!\n\n"
+        completion_msg += f"Total frames read from video: {actual_read_frames}\n"
+        completion_msg += f"Frames extracted (every {frame_interval}): {saved_count}\n"
+        if skipped_count > 0:
+            completion_msg += f"Frames skipped (errors): {skipped_count}\n"
+        if actual_read_frames < total_frames:
+            completion_msg += f"\nNote: Video metadata reported {total_frames} frames,\n"
+            completion_msg += f"but only {actual_read_frames} were readable.\n"
+            completion_msg += f"This is normal for some video formats.\n"
+        completion_msg += f"\nOutput folder:\n{output_folder}\n"
+        completion_msg += f"\nOpening folder for annotation..."
+        
+        if errors and skipped_count > 0:
+            completion_msg += f"\n\nWarning: {skipped_count} frames had errors."
+        
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Extraction Complete")
+        msg_box.setText(completion_msg)
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.setStyleSheet(f"""
+            QMessageBox {{
+                background-color: {COLORS['background']};
+            }}
+            QMessageBox QLabel {{
+                color: {COLORS['text']};
+                font-size: 11px;
+                min-width: 400px;
+            }}
+            QPushButton {{
+                background-color: {COLORS['accent']};
+                color: white;
+                border: none;
+                padding: 8px 20px;
+                border-radius: 4px;
+                font-weight: bold;
+                min-width: 80px;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['accent_hover']};
+            }}
+        """)
+        msg_box.exec_()
+        
+        self.image_folder = output_folder
+        self.image_list = self.file_mgr.get_image_list(output_folder, VALID_IMAGE_EXTENSIONS)
+        
+        if self.image_list:
+            self.progress_bar.setMaximum(len(self.image_list))
+            self.update_progress()
+            self.current_index = 0
+            self.load_image()
+    
+    def _sanitize_filename(self, name):
+        import unicodedata
+        normalized = unicodedata.normalize('NFKD', name)
+        ascii_name = normalized.encode('ascii', 'ignore').decode('ascii')
+        if not ascii_name:
+            ascii_name = "video"
+        return "".join(c if c.isalnum() or c in "._-" else "_" for c in ascii_name)
     
     def update_progress(self):
         if not self.image_list:
@@ -754,8 +1218,10 @@ class MainWindow(QMainWindow):
         painter = QPainter(canvas)
         painter.setRenderHint(QPainter.Antialiasing)
         
-        draw_x = int(self.offset_x + pan_x)
-        draw_y = int(self.offset_y + pan_y)
+        zoomed_offset_x = (self.image_label.width() - zoomed_w) / 2
+        zoomed_offset_y = (self.image_label.height() - zoomed_h) / 2
+        draw_x = int(zoomed_offset_x + pan_x)
+        draw_y = int(zoomed_offset_y + pan_y)
         painter.drawPixmap(draw_x, draw_y, zoomed)
         
         orig_w, orig_h = self.original_pixmap.width(), self.original_pixmap.height()
@@ -764,8 +1230,8 @@ class MainWindow(QMainWindow):
         
         effective_scale_x = self.scale_factor_x * zoom
         effective_scale_y = self.scale_factor_y * zoom
-        adj_offset_x = self.offset_x + pan_x
-        adj_offset_y = self.offset_y + pan_y
+        adj_offset_x = zoomed_offset_x + pan_x
+        adj_offset_y = zoomed_offset_y + pan_y
         
         for i, box in enumerate(boxes):
             rect = BoxGeometry.get_box_rect_px(box, orig_w, orig_h, effective_scale_x, effective_scale_y)
@@ -929,15 +1395,17 @@ class MainWindow(QMainWindow):
         painter = QPainter(canvas)
         painter.setRenderHint(QPainter.Antialiasing)
         
-        draw_x = int(self.offset_x + pan_x)
-        draw_y = int(self.offset_y + pan_y)
+        zoomed_offset_x = (self.image_label.width() - zoomed_w) / 2
+        zoomed_offset_y = (self.image_label.height() - zoomed_h) / 2
+        draw_x = int(zoomed_offset_x + pan_x)
+        draw_y = int(zoomed_offset_y + pan_y)
         painter.drawPixmap(draw_x, draw_y, zoomed)
         
         orig_w, orig_h = self.original_pixmap.width(), self.original_pixmap.height()
         effective_scale_x = self.scale_factor_x * zoom
         effective_scale_y = self.scale_factor_y * zoom
-        adj_offset_x = self.offset_x + pan_x
-        adj_offset_y = self.offset_y + pan_y
+        adj_offset_x = zoomed_offset_x + pan_x
+        adj_offset_y = zoomed_offset_y + pan_y
         
         self._draw_existing_boxes_zoomed(painter, orig_w, orig_h, effective_scale_x, effective_scale_y, adj_offset_x, adj_offset_y)
         self._draw_existing_masks_zoomed(painter, orig_w, orig_h, effective_scale_x, effective_scale_y, adj_offset_x, adj_offset_y)
@@ -968,8 +1436,18 @@ class MainWindow(QMainWindow):
         pan_x = self.image_label.pan_offset_x
         pan_y = self.image_label.pan_offset_y
         
-        adj_offset_x = self.offset_x + pan_x
-        adj_offset_y = self.offset_y + pan_y
+        base_scaled = self.original_pixmap.scaled(
+            self.image_label.size(), 
+            Qt.KeepAspectRatio, 
+            Qt.SmoothTransformation
+        )
+        zoomed_w = int(base_scaled.width() * zoom)
+        zoomed_h = int(base_scaled.height() * zoom)
+        zoomed_offset_x = (self.image_label.width() - zoomed_w) / 2
+        zoomed_offset_y = (self.image_label.height() - zoomed_h) / 2
+        
+        adj_offset_x = zoomed_offset_x + pan_x
+        adj_offset_y = zoomed_offset_y + pan_y
         
         x1 = (start.x() - adj_offset_x) / zoom
         y1 = (start.y() - adj_offset_y) / zoom
@@ -1123,15 +1601,17 @@ class MainWindow(QMainWindow):
         painter = QPainter(canvas)
         painter.setRenderHint(QPainter.Antialiasing)
         
-        draw_x = int(self.offset_x + pan_x)
-        draw_y = int(self.offset_y + pan_y)
+        zoomed_offset_x = (self.image_label.width() - zoomed_w) / 2
+        zoomed_offset_y = (self.image_label.height() - zoomed_h) / 2
+        draw_x = int(zoomed_offset_x + pan_x)
+        draw_y = int(zoomed_offset_y + pan_y)
         painter.drawPixmap(draw_x, draw_y, zoomed)
         
         orig_w, orig_h = self.original_pixmap.width(), self.original_pixmap.height()
         effective_scale_x = self.scale_factor_x * zoom
         effective_scale_y = self.scale_factor_y * zoom
-        adj_offset_x = self.offset_x + pan_x
-        adj_offset_y = self.offset_y + pan_y
+        adj_offset_x = zoomed_offset_x + pan_x
+        adj_offset_y = zoomed_offset_y + pan_y
         
         boxes = self.annotation_mgr.get_boxes()
         selected_idx = self.annotation_mgr.selected_index
@@ -1172,8 +1652,18 @@ class MainWindow(QMainWindow):
         pan_x = self.image_label.pan_offset_x
         pan_y = self.image_label.pan_offset_y
         
-        adj_offset_x = self.offset_x + pan_x
-        adj_offset_y = self.offset_y + pan_y
+        base_scaled = self.original_pixmap.scaled(
+            self.image_label.size(), 
+            Qt.KeepAspectRatio, 
+            Qt.SmoothTransformation
+        )
+        zoomed_w = int(base_scaled.width() * zoom)
+        zoomed_h = int(base_scaled.height() * zoom)
+        zoomed_offset_x = (self.image_label.width() - zoomed_w) / 2
+        zoomed_offset_y = (self.image_label.height() - zoomed_h) / 2
+        
+        adj_offset_x = zoomed_offset_x + pan_x
+        adj_offset_y = zoomed_offset_y + pan_y
         
         x1 = (start.x() - adj_offset_x) / zoom
         y1 = (start.y() - adj_offset_y) / zoom
@@ -1214,8 +1704,18 @@ class MainWindow(QMainWindow):
         pan_x = self.image_label.pan_offset_x
         pan_y = self.image_label.pan_offset_y
         
-        adj_offset_x = self.offset_x + pan_x
-        adj_offset_y = self.offset_y + pan_y
+        base_scaled = self.original_pixmap.scaled(
+            self.image_label.size(), 
+            Qt.KeepAspectRatio, 
+            Qt.SmoothTransformation
+        )
+        zoomed_w = int(base_scaled.width() * zoom)
+        zoomed_h = int(base_scaled.height() * zoom)
+        zoomed_offset_x = (self.image_label.width() - zoomed_w) / 2
+        zoomed_offset_y = (self.image_label.height() - zoomed_h) / 2
+        
+        adj_offset_x = zoomed_offset_x + pan_x
+        adj_offset_y = zoomed_offset_y + pan_y
         
         real_x = (mouse_x - adj_offset_x) / zoom
         real_y = (mouse_y - adj_offset_y) / zoom

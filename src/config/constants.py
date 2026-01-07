@@ -66,6 +66,9 @@ DEFAULT_MODEL_PATH = "runs/detect/iran_syria_v1/weights/best.pt"
 # Valid image extensions
 VALID_IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.bmp']
 
+# Valid video extensions
+VALID_VIDEO_EXTENSIONS = ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm']
+
 
 # Minimum box size (as fraction of image)
 MIN_BOX_SIZE = 0.01

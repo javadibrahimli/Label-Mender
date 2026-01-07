@@ -59,8 +59,17 @@ class ImageCanvas(QLabel):
         if not rect:
             return HandlePosition.NONE
         
-        adj_offset_x = self.parent_window.offset_x + self.pan_offset_x
-        adj_offset_y = self.parent_window.offset_y + self.pan_offset_y
+        from PyQt5.QtCore import Qt
+        base_scaled = self.parent_window.original_pixmap.scaled(
+            self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
+        zoomed_w = int(base_scaled.width() * self.zoom_level)
+        zoomed_h = int(base_scaled.height() * self.zoom_level)
+        zoomed_offset_x = (self.width() - zoomed_w) / 2
+        zoomed_offset_y = (self.height() - zoomed_h) / 2
+        
+        adj_offset_x = zoomed_offset_x + self.pan_offset_x
+        adj_offset_y = zoomed_offset_y + self.pan_offset_y
         
         x = pos.x() - adj_offset_x
         y = pos.y() - adj_offset_y
@@ -108,7 +117,6 @@ class ImageCanvas(QLabel):
         if not self.parent_window or not self.parent_window.original_pixmap:
             return
         
-        mouse_pos = event.pos()
         old_zoom = self.zoom_level
         
         delta = event.angleDelta().y()
@@ -118,14 +126,6 @@ class ImageCanvas(QLabel):
             self.zoom_level = max(self.zoom_level / 1.15, self.min_zoom)
         
         if old_zoom != self.zoom_level:
-            zoom_ratio = self.zoom_level / old_zoom
-            
-            rel_x = mouse_pos.x() - self.parent_window.offset_x - self.pan_offset_x
-            rel_y = mouse_pos.y() - self.parent_window.offset_y - self.pan_offset_y
-            
-            self.pan_offset_x -= rel_x * (zoom_ratio - 1)
-            self.pan_offset_y -= rel_y * (zoom_ratio - 1)
-            
             self.parent_window.draw_boxes()
             self.parent_window.update_zoom_label()
     

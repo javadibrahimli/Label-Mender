@@ -250,6 +250,10 @@ class MainWindow(QMainWindow):
         self.confidence_threshold = DEFAULT_CONFIDENCE
         self.raw_detections = []
         
+        self.comparison_mode = False
+        self.ground_truth_boxes = []
+        self.detection_boxes = []
+        
         self.draw_mode = False
         self.default_class = 0
         
@@ -435,6 +439,12 @@ class MainWindow(QMainWindow):
         detect_group = QGroupBox("Detections")
         detect_layout = QVBoxLayout(detect_group)
         detect_layout.setSpacing(4)
+        
+        self.btn_comparison_mode = QPushButton("Compare: OFF [C]")
+        self.btn_comparison_mode.setCheckable(True)
+        self.btn_comparison_mode.setToolTip("Compare model detections with ground truth labels")
+        self.btn_comparison_mode.clicked.connect(self.toggle_comparison_mode)
+        detect_layout.addWidget(self.btn_comparison_mode)
         
         self.box_list = QListWidget()
         self.box_list.setMaximumHeight(120)
@@ -1140,8 +1150,16 @@ class MainWindow(QMainWindow):
         txt_path = os.path.splitext(self.current_image_path)[0] + ".txt"
         self.annotation_mgr.clear()
         self.raw_detections = []
+        self.ground_truth_boxes = []
+        self.detection_boxes = []
         
-        if os.path.exists(txt_path):
+        if self.comparison_mode and self.model_mgr.is_loaded():
+            self.load_comparison_data()
+            gt_count = len(self.ground_truth_boxes)
+            det_count = len(self.detection_boxes)
+            self.lbl_info.setText(f"{filename}  ({self.current_index + 1}/{len(self.image_list)}) - GT: {gt_count} | Det: {det_count}")
+            self.lbl_info.setStyleSheet(INFO_LABEL_STYLE)
+        elif os.path.exists(txt_path):
             boxes = self.file_mgr.load_annotations(txt_path)
             self.annotation_mgr.set_boxes(boxes)
             self.lbl_info.setText(f"{filename}  ({self.current_index + 1}/{len(self.image_list)}) - ✓ {len(boxes)} labels")
@@ -1233,50 +1251,57 @@ class MainWindow(QMainWindow):
         adj_offset_x = zoomed_offset_x + pan_x
         adj_offset_y = zoomed_offset_y + pan_y
         
-        for i, box in enumerate(boxes):
-            rect = BoxGeometry.get_box_rect_px(box, orig_w, orig_h, effective_scale_x, effective_scale_y)
-            
-            if not rect:
-                continue
-            
-            rect.translate(int(adj_offset_x), int(adj_offset_y))
-            is_selected = (i == selected_idx)
-            
-            if is_selected:
-                pen = QPen(QColor(0, 200, 255), 2)
-            else:
-                pen = QPen(QColor(255, 80, 80), 2)
-            
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRect(rect)
-            
-            if is_selected:
-                self.draw_handles(painter, rect)
-            
-            painter.setFont(QFont("Consolas", 9, QFont.Bold))
-            label = f"{self.get_class_name(box['class'])} {box.get('conf', 1.0):.2f}"
-            
-            text_rect = painter.fontMetrics().boundingRect(label)
-            painter.fillRect(
-                int(rect.x()), int(rect.y()) - text_rect.height() - 2,
-                text_rect.width() + 6, text_rect.height() + 2, 
-                QColor(0, 0, 0, 180)
-            )
-            painter.setPen(QColor(255, 255, 255))
-            painter.drawText(int(rect.x()) + 3, int(rect.y()) - 4, label)
+        if self.comparison_mode:
+            self.draw_detection_boxes(painter, self.detection_boxes, orig_w, orig_h, effective_scale_x, effective_scale_y, adj_offset_x, adj_offset_y)
+            self.draw_ground_truth_boxes(painter, self.ground_truth_boxes, orig_w, orig_h, effective_scale_x, effective_scale_y, adj_offset_x, adj_offset_y, selected_idx)
+        else:
+            for i, box in enumerate(boxes):
+                rect = BoxGeometry.get_box_rect_px(box, orig_w, orig_h, effective_scale_x, effective_scale_y)
+                
+                if not rect:
+                    continue
+                
+                rect.translate(int(adj_offset_x), int(adj_offset_y))
+                is_selected = (i == selected_idx)
+                
+                if is_selected:
+                    pen = QPen(QColor(0, 200, 255), 2)
+                else:
+                    pen = QPen(QColor(255, 80, 80), 2)
+                
+                painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(rect)
+                
+                if is_selected:
+                    self.draw_handles(painter, rect)
+                
+                painter.setFont(QFont("Consolas", 9, QFont.Bold))
+                label = f"{self.get_class_name(box['class'])} {box.get('conf', 1.0):.2f}"
+                
+                text_rect = painter.fontMetrics().boundingRect(label)
+                painter.fillRect(
+                    int(rect.x()), int(rect.y()) - text_rect.height() - 2,
+                    text_rect.width() + 6, text_rect.height() + 2, 
+                    QColor(0, 0, 0, 180)
+                )
+                painter.setPen(QColor(255, 255, 255))
+                painter.drawText(int(rect.x()) + 3, int(rect.y()) - 4, label)
         
         self._draw_existing_masks_zoomed(painter, orig_w, orig_h, effective_scale_x, effective_scale_y, adj_offset_x, adj_offset_y)
         
-        plate_text = self.annotation_mgr.get_plate_reading(self.class_names)
-        if plate_text:
-            painter.setFont(QFont("Consolas", 14, QFont.Bold))
-            text_rect = painter.fontMetrics().boundingRect(plate_text)
-            bg_x = (canvas.width() - text_rect.width() - 24) // 2
-            bg_y = canvas.height() - 38
-            painter.fillRect(bg_x, bg_y, text_rect.width() + 24, 32, QColor(0, 0, 0, 220))
-            painter.setPen(QColor(100, 255, 150))
-            painter.drawText(bg_x + 12, bg_y + 23, plate_text)
+        if self.comparison_mode:
+            self.draw_comparison_legend(painter, canvas.width(), canvas.height())
+        else:
+            plate_text = self.annotation_mgr.get_plate_reading(self.class_names)
+            if plate_text:
+                painter.setFont(QFont("Consolas", 14, QFont.Bold))
+                text_rect = painter.fontMetrics().boundingRect(plate_text)
+                bg_x = (canvas.width() - text_rect.width() - 24) // 2
+                bg_y = canvas.height() - 38
+                painter.fillRect(bg_x, bg_y, text_rect.width() + 24, 32, QColor(0, 0, 0, 220))
+                painter.setPen(QColor(100, 255, 150))
+                painter.drawText(bg_x + 12, bg_y + 23, plate_text)
         
         painter.end()
         self.image_label.setPixmap(canvas)
@@ -1309,6 +1334,89 @@ class MainWindow(QMainWindow):
         for ex, ey in edges:
             painter.drawRect(ex, ey, hs, hs)
     
+    def draw_detection_boxes(self, painter, boxes, orig_w, orig_h, scale_x, scale_y, offset_x, offset_y):
+        """Draw model detection boxes in red/orange."""
+        for box in boxes:
+            rect = BoxGeometry.get_box_rect_px(box, orig_w, orig_h, scale_x, scale_y)
+            if not rect:
+                continue
+            
+            rect.translate(int(offset_x), int(offset_y))
+            
+            pen = QPen(QColor(255, 100, 50), 2)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(rect)
+            
+            painter.setFont(QFont("Consolas", 9, QFont.Bold))
+            label = f"Det: {self.get_class_name(box['class'])} {box.get('conf', 1.0):.2f}"
+            
+            text_rect = painter.fontMetrics().boundingRect(label)
+            painter.fillRect(
+                int(rect.x()), int(rect.y()) - text_rect.height() - 2,
+                text_rect.width() + 6, text_rect.height() + 2,
+                QColor(255, 100, 50, 200)
+            )
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(int(rect.x()) + 3, int(rect.y()) - 4, label)
+    
+    def draw_ground_truth_boxes(self, painter, boxes, orig_w, orig_h, scale_x, scale_y, offset_x, offset_y, selected_idx):
+        """Draw ground truth boxes in green."""
+        for i, box in enumerate(boxes):
+            rect = BoxGeometry.get_box_rect_px(box, orig_w, orig_h, scale_x, scale_y)
+            if not rect:
+                continue
+            
+            rect.translate(int(offset_x), int(offset_y))
+            is_selected = (i == selected_idx)
+            
+            if is_selected:
+                pen = QPen(QColor(100, 255, 150), 3)
+            else:
+                pen = QPen(QColor(50, 255, 50), 2)
+            
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(rect)
+            
+            if is_selected:
+                self.draw_handles(painter, rect)
+            
+            painter.setFont(QFont("Consolas", 9, QFont.Bold))
+            label = f"GT: {self.get_class_name(box['class'])}"
+            
+            text_rect = painter.fontMetrics().boundingRect(label)
+            y_offset = text_rect.height() + 4
+            painter.fillRect(
+                int(rect.x()), int(rect.y() + rect.height()) + 2,
+                text_rect.width() + 6, text_rect.height() + 2,
+                QColor(50, 255, 50, 200)
+            )
+            painter.setPen(QColor(0, 0, 0))
+            painter.drawText(int(rect.x()) + 3, int(rect.y() + rect.height()) + text_rect.height(), label)
+    
+    def draw_comparison_legend(self, painter, canvas_width, canvas_height):
+        """Draw legend for comparison mode."""
+        legend_x = 10
+        legend_y = canvas_height - 80
+        
+        painter.fillRect(legend_x, legend_y, 200, 70, QColor(0, 0, 0, 200))
+        
+        painter.setFont(QFont("Consolas", 10, QFont.Bold))
+        painter.setPen(QColor(255, 255, 255))
+        painter.drawText(legend_x + 10, legend_y + 18, "Comparison Mode")
+        
+        painter.setPen(QPen(QColor(255, 100, 50), 2))
+        painter.drawLine(legend_x + 10, legend_y + 30, legend_x + 40, legend_y + 30)
+        painter.setPen(QColor(255, 255, 255))
+        painter.setFont(QFont("Consolas", 9))
+        painter.drawText(legend_x + 50, legend_y + 35, "Model Detection")
+        
+        painter.setPen(QPen(QColor(50, 255, 50), 2))
+        painter.drawLine(legend_x + 10, legend_y + 50, legend_x + 40, legend_y + 50)
+        painter.setPen(QColor(255, 255, 255))
+        painter.drawText(legend_x + 50, legend_y + 55, "Ground Truth")
+    
     def toggle_draw_mode(self):
         if self.mask_mode:
             self.toggle_mask_mode()
@@ -1340,6 +1448,62 @@ class MainWindow(QMainWindow):
             self.btn_mask_mode.setChecked(False)
             self.btn_mask_mode.setStyleSheet(f"background-color: #555; color: white;")
             self.image_label.setCursor(Qt.ArrowCursor)
+    
+    def toggle_comparison_mode(self):
+        """Toggle between normal mode and comparison mode (GT vs Detections)."""
+        self.comparison_mode = not self.comparison_mode
+        if self.comparison_mode:
+            self.btn_comparison_mode.setText("Compare: ON [C]")
+            self.btn_comparison_mode.setChecked(True)
+            self.btn_comparison_mode.setStyleSheet(f"background-color: {COLORS['accent']}; color: white; font-weight: bold;")
+            
+            if not self.model_mgr.is_loaded():
+                QMessageBox.warning(self, "No Model", "Please load a model first to use comparison mode.")
+                self.comparison_mode = False
+                self.btn_comparison_mode.setText("Compare: OFF [C]")
+                self.btn_comparison_mode.setChecked(False)
+                self.btn_comparison_mode.setStyleSheet("")
+                return
+            
+            self.load_comparison_data()
+        else:
+            self.btn_comparison_mode.setText("Compare: OFF [C]")
+            self.btn_comparison_mode.setChecked(False)
+            self.btn_comparison_mode.setStyleSheet("")
+            txt_path = os.path.splitext(self.current_image_path)[0] + ".txt"
+            if os.path.exists(txt_path):
+                boxes = self.file_mgr.load_annotations(txt_path)
+                self.annotation_mgr.set_boxes(boxes)
+            else:
+                self.annotation_mgr.set_boxes(self.raw_detections[:])
+        
+        self.update_list_widget()
+        self.draw_boxes()
+    
+    def load_comparison_data(self):
+        """Load both ground truth and model detections for comparison."""
+        if not self.current_image_path:
+            return
+        
+        txt_path = os.path.splitext(self.current_image_path)[0] + ".txt"
+        if os.path.exists(txt_path):
+            self.ground_truth_boxes = self.file_mgr.load_annotations(txt_path)
+        else:
+            self.ground_truth_boxes = []
+        
+        if self.model_mgr.is_loaded():
+            self.raw_detections = self.model_mgr.run_inference(
+                self.current_image_path,
+                self.confidence_threshold
+            )
+            self.detection_boxes = self.annotation_mgr.filter_by_confidence(
+                self.raw_detections,
+                self.confidence_threshold
+            )
+        else:
+            self.detection_boxes = []
+        
+        self.annotation_mgr.set_boxes(self.ground_truth_boxes)
     
     def mask_list_selection_changed(self, row):
         self.selected_mask_index = row
@@ -1951,6 +2115,8 @@ class MainWindow(QMainWindow):
             self.toggle_draw_mode()
         elif key == Qt.Key_M:
             self.toggle_mask_mode()
+        elif key == Qt.Key_C:
+            self.toggle_comparison_mode()
         elif key == Qt.Key_R:
             self.reset_view()
         elif key == Qt.Key_Q:

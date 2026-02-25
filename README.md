@@ -96,12 +96,31 @@ python app.py
 └─────────────────┘     └─────────────────┘     └─────────────────┘
 ```
 
+### Using Comparison Mode
+
+The **Comparison Mode** allows you to visualize both your model's detections and the ground truth labels simultaneously:
+
+1. **Load your model** - Click "Load .pt" and select your trained YOLO model
+2. **Open a folder** - Click "Open Folder" and select a directory containing both images and their label files (.txt)
+3. **Enable Comparison Mode** - Click "Compare: OFF [C]" or press `C` on your keyboard
+4. **Review results** - The display will show:
+   - **Red/Orange boxes** - Model detections with confidence scores
+   - **Green boxes** - Ground truth labels from .txt files
+   - Each box displays its class name and confidence (for detections)
+   - A legend in the bottom-left corner shows which color represents what
+
+This feature is particularly useful for:
+- **Model validation** - Quickly identify where your model makes mistakes
+- **Dataset quality check** - Verify that ground truth labels are accurate
+- **Performance analysis** - Visually compare detection accuracy across images
+
 ## Features
 
 | Feature | Description |
 |---------|-------------|
 | **Cross-Platform** | Works on Windows, Linux, and macOS |
 | **Model-Assisted Labeling** | Use your YOLO model for initial detections, then correct errors |
+| **Comparison Mode** | Visualize both model detections and ground truth labels simultaneously for validation |
 | **Quick Class Correction** | Press number keys 1-9 to instantly change box class |
 | **Interactive Box Editing** | Click to select, drag to move, resize via corner/edge handles |
 | **Draw Mode** | Create new bounding boxes for missed detections |
@@ -115,12 +134,15 @@ python app.py
 | Key | Action |
 |-----|--------|
 | `W` | Toggle Draw Mode |
+| `C` | Toggle Comparison Mode (GT vs Detections) |
+| `M` | Toggle Mask Mode |
 | `A` | Previous Image |
 | `D` | Next Image |
 | `S` | Save Annotations |
 | `Q` | Skip Image |
 | `N` | Next Unannotated Image |
 | `X` | Delete Current Image |
+| `R` | Reset View (Zoom & Pan) |
 | `Del` | Delete Selected Box |
 | `Esc` | Deselect / Exit Draw Mode |
 | `1-9` | Set class of selected box |

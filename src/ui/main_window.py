@@ -2,14 +2,14 @@
 
 import os
 import cv2
-from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QPushButton, QLabel, QFileDialog, QListWidget, 
-                             QSpinBox, QMessageBox, QSlider, QComboBox, 
+from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+                             QPushButton, QLabel, QFileDialog, QListWidget, QListWidgetItem,
+                             QSpinBox, QMessageBox, QSlider, QComboBox, QCheckBox,
                              QProgressBar, QGroupBox, QInputDialog, QApplication,
                              QSizePolicy, QTabWidget, QScrollArea, QFrame, QDialog,
                              QFormLayout, QDialogButtonBox)
 from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QFont, QBrush, QIcon
-from PyQt5.QtCore import Qt, QRect
+from PyQt5.QtCore import Qt, QRect, QEvent, QTimer
 
 from ..config import COLORS, STYLESHEET, DEFAULT_MODEL_PATH, VALID_IMAGE_EXTENSIONS, VALID_VIDEO_EXTENSIONS, DEFAULT_CONFIDENCE, HANDLE_SIZE, VERSION
 from ..config.styles import (PANEL_STYLE, CANVAS_STYLE, INFO_LABEL_STYLE, 
@@ -262,31 +262,80 @@ class MainWindow(QMainWindow):
         self.selected_mask_index = -1
         
         self.class_file_path = ""
-        
+
+        # Annotation existence cache: img_name -> bool
+        self._annotation_cache = {}
+
+        # Zoomed pixmap cache to avoid re-scaling on pan
+        self._zoom_cache_key = None
+        self._zoom_cache_pixmap = None
+
         self.init_ui()
         self.auto_load_model()
+        # Global key filter so shortcuts work regardless of which widget has focus
+        QApplication.instance().installEventFilter(self)
     
     def init_ui(self):
         self.setStyleSheet(STYLESHEET)
-        
+
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
-        main_layout.setSpacing(8)
+        main_layout.setSpacing(6)
         main_layout.setContentsMargins(8, 8, 8, 8)
-        
+
+        # --- Left: image file list panel ---
+        file_panel = QWidget()
+        file_panel.setFixedWidth(175)
+        file_panel.setStyleSheet(f"""
+            QWidget {{ background-color: {COLORS['surface']}; }}
+        """)
+        file_panel_layout = QVBoxLayout(file_panel)
+        file_panel_layout.setContentsMargins(4, 6, 4, 4)
+        file_panel_layout.setSpacing(4)
+
+        lbl_files = QLabel("Images")
+        lbl_files.setStyleSheet(f"color: {COLORS['text']}; font-size: 10px; font-weight: 600;")
+        file_panel_layout.addWidget(lbl_files)
+
+        self.image_file_list = QListWidget()
+        self.image_file_list.setStyleSheet(f"""
+            QListWidget {{
+                background: {COLORS['background']};
+                color: {COLORS['text']};
+                border: 1px solid {COLORS['border']};
+                font-size: 9px;
+                outline: none;
+            }}
+            QListWidget::item {{
+                padding: 2px 4px;
+                border-bottom: 1px solid {COLORS['border']};
+            }}
+            QListWidget::item:selected {{
+                background: {COLORS['accent']};
+                color: white;
+            }}
+            QListWidget::item:hover:!selected {{
+                background: {COLORS['surface_elevated']};
+            }}
+        """)
+        self.image_file_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.image_file_list.currentRowChanged.connect(self.on_file_list_selection)
+        file_panel_layout.addWidget(self.image_file_list)
+
+        # --- Center: canvas ---
         canvas_wrapper = QWidget()
         canvas_wrapper.setStyleSheet(CANVAS_STYLE)
         canvas_layout = QVBoxLayout(canvas_wrapper)
         canvas_layout.setContentsMargins(4, 4, 4, 4)
-        
+
         self.image_label = ImageCanvas(self)
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setStyleSheet(f"background-color: {COLORS['canvas']};")
-        self.image_label.setMinimumSize(800, 600)
+        self.image_label.setMinimumSize(700, 500)
         self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         canvas_layout.addWidget(self.image_label)
-        
+
         zoom_bar = QHBoxLayout()
         self.lbl_zoom = QLabel("100%")
         self.lbl_zoom.setStyleSheet(f"color: {COLORS['text']}; font-size: 10px;")
@@ -298,7 +347,8 @@ class MainWindow(QMainWindow):
         zoom_bar.addStretch()
         zoom_bar.addWidget(self.btn_reset_view)
         canvas_layout.addLayout(zoom_bar)
-        
+
+        # --- Right: controls tab ---
         self.tabs = QTabWidget()
         self.tabs.setMinimumWidth(200)
         self.tabs.setMaximumWidth(350)
@@ -307,15 +357,16 @@ class MainWindow(QMainWindow):
             QTabBar::tab {{ background: {COLORS['surface']}; color: {COLORS['text']}; padding: 5px 10px; border: 1px solid {COLORS['border']}; font-size: 10px; }}
             QTabBar::tab:selected {{ background: {COLORS['accent']}; color: white; }}
         """)
-        
+
         controls_tab = self.create_control_panel()
         stats_tab = self.create_stats_panel()
-        
+
         self.tabs.addTab(controls_tab, "Controls")
         self.tabs.addTab(stats_tab, "Statistics")
-        
-        main_layout.addWidget(canvas_wrapper, 80)
-        main_layout.addWidget(self.tabs, 20)
+
+        main_layout.addWidget(file_panel)
+        main_layout.addWidget(canvas_wrapper, 1)
+        main_layout.addWidget(self.tabs)
     
     def create_control_panel(self):
         scroll_area = QScrollArea()
@@ -550,18 +601,19 @@ class MainWindow(QMainWindow):
         
         nav_btn_row = QHBoxLayout()
         self.btn_prev = QPushButton("← [A]")
-        self.btn_prev.setToolTip("Previous image")
+        self.btn_prev.setToolTip("Go to previous image [A]")
         self.btn_prev.clicked.connect(self.prev_image)
         self.btn_next = QPushButton("[D] →")
-        self.btn_next.setToolTip("Next image")
+        self.btn_next.setToolTip("Go to next image without saving [D]")
         self.btn_next.clicked.connect(self.next_image)
         nav_btn_row.addWidget(self.btn_prev)
         nav_btn_row.addWidget(self.btn_next)
         nav_layout.addLayout(nav_btn_row)
-        
+
         self.btn_save = QPushButton("SAVE [S]")
+        self.btn_save.setToolTip("Save annotations and go to next image [S]")
         self.btn_save.setStyleSheet(f"background-color: {COLORS['accent']}; color: white; font-weight: bold; padding: 6px;")
-        self.btn_save.clicked.connect(self.save_annotation)
+        self.btn_save.clicked.connect(lambda: self.save_annotation(go_next=True))
         nav_layout.addWidget(self.btn_save)
         
         action_row = QHBoxLayout()
@@ -579,7 +631,15 @@ class MainWindow(QMainWindow):
         self.btn_next_unannotated.setToolTip("Jump to next unannotated image")
         self.btn_next_unannotated.clicked.connect(self.goto_next_unannotated)
         nav_layout.addWidget(self.btn_next_unannotated)
-        
+
+        self.chk_space_delete = QCheckBox("Space → Delete Image")
+        self.chk_space_delete.setToolTip(
+            "When checked: pressing Space deletes the current image\n"
+            "and moves to the next one (no confirmation)"
+        )
+        self.chk_space_delete.setStyleSheet(f"color: {COLORS['text']}; font-size: 10px; padding-top: 4px;")
+        nav_layout.addWidget(self.chk_space_delete)
+
         return nav_group
     
     def create_stats_panel(self):
@@ -923,22 +983,36 @@ class MainWindow(QMainWindow):
         dir_path = QFileDialog.getExistingDirectory(self, "Select Image Folder")
         if dir_path:
             self.image_folder = dir_path
-            self.image_list = self.file_mgr.get_image_list(dir_path, VALID_IMAGE_EXTENSIONS)
-            
-            if not self.image_list:
+            all_images = self.file_mgr.get_image_list(dir_path, VALID_IMAGE_EXTENSIONS)
+
+            if not all_images:
                 QMessageBox.warning(self, "Warning", "No images found in folder")
                 return
-            
+
+            # Build annotation cache, then sort: unlabeled first
+            self._annotation_cache = {}
+            for img in all_images:
+                self._annotation_cache[img] = self.file_mgr.annotation_exists(dir_path, img)
+
+            unlabeled = [f for f in all_images if not self._annotation_cache[f]]
+            labeled = [f for f in all_images if self._annotation_cache[f]]
+            self.image_list = unlabeled + labeled
+
+            labeled_count = len(labeled)
+
             self.progress_bar.setMaximum(len(self.image_list))
             self.update_progress()
-            
+
             self.current_index = 0
+            self.update_file_list()
             self.load_image()
-            
-            labeled_count = sum(1 for img in self.image_list if self.file_mgr.annotation_exists(self.image_folder, img))
+
             if labeled_count > 0:
-                QMessageBox.information(self, "Folder Loaded", 
-                    f"Found {len(self.image_list)} images\n{labeled_count} have existing labels\n{len(self.image_list) - labeled_count} need annotation")
+                QMessageBox.information(self, "Folder Loaded",
+                    f"Found {len(self.image_list)} images\n"
+                    f"{labeled_count} have existing labels\n"
+                    f"{len(unlabeled)} need annotation\n\n"
+                    f"Unlabeled images are shown first.")
     
     def open_video_file(self):
         video_filter = "Video Files (" + " ".join(f"*{ext}" for ext in VALID_VIDEO_EXTENSIONS) + ")"
@@ -1104,12 +1178,18 @@ class MainWindow(QMainWindow):
         msg_box.exec_()
         
         self.image_folder = output_folder
-        self.image_list = self.file_mgr.get_image_list(output_folder, VALID_IMAGE_EXTENSIONS)
-        
-        if self.image_list:
+        all_images = self.file_mgr.get_image_list(output_folder, VALID_IMAGE_EXTENSIONS)
+
+        if all_images:
+            self._annotation_cache = {img: self.file_mgr.annotation_exists(output_folder, img) for img in all_images}
+            unlabeled = [f for f in all_images if not self._annotation_cache[f]]
+            labeled = [f for f in all_images if self._annotation_cache[f]]
+            self.image_list = unlabeled + labeled
+
             self.progress_bar.setMaximum(len(self.image_list))
             self.update_progress()
             self.current_index = 0
+            self.update_file_list()
             self.load_image()
     
     def _sanitize_filename(self, name):
@@ -1123,24 +1203,30 @@ class MainWindow(QMainWindow):
     def update_progress(self):
         if not self.image_list:
             return
-        annotated = sum(
-            1 for img in self.image_list 
-            if self.file_mgr.annotation_exists(self.image_folder, img)
-        )
+        annotated = sum(1 for img in self.image_list if self._annotation_exists(img))
         self.progress_bar.setValue(annotated)
     
     def load_image(self):
         if not self.image_list:
             return
-        
+
         filename = self.image_list[self.current_index]
         self.current_image_path = os.path.join(self.image_folder, filename)
         self.original_pixmap = QPixmap(self.current_image_path)
-        
+
+        # Invalidate zoom cache on new image
+        self._zoom_cache_key = None
+        self._zoom_cache_pixmap = None
+
         self.image_label.zoom_level = 1.0
         self.image_label.pan_offset_x = 0
         self.image_label.pan_offset_y = 0
         self.update_zoom_label()
+
+        # Sync left panel selection
+        self.image_file_list.blockSignals(True)
+        self.image_file_list.setCurrentRow(self.current_index)
+        self.image_file_list.blockSignals(False)
         
         self.display_image()
         
@@ -1215,20 +1301,13 @@ class MainWindow(QMainWindow):
     def draw_boxes(self):
         if not self.original_pixmap:
             return
-        
+
         zoom = self.image_label.zoom_level
         pan_x = self.image_label.pan_offset_x
         pan_y = self.image_label.pan_offset_y
-        
-        base_scaled = self.original_pixmap.scaled(
-            self.image_label.size(), 
-            Qt.KeepAspectRatio, 
-            Qt.SmoothTransformation
-        )
-        
-        zoomed_w = int(base_scaled.width() * zoom)
-        zoomed_h = int(base_scaled.height() * zoom)
-        zoomed = self.original_pixmap.scaled(zoomed_w, zoomed_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+        zoomed_w, zoomed_h = self._compute_zoomed_size(zoom)
+        zoomed = self._get_zoomed_pixmap(zoomed_w, zoomed_h)
         
         canvas = QPixmap(self.image_label.size())
         canvas.fill(QColor(COLORS['canvas']))
@@ -1538,20 +1617,13 @@ class MainWindow(QMainWindow):
     def draw_temp_mask(self, start, end):
         if not self.original_pixmap:
             return
-        
+
         zoom = self.image_label.zoom_level
         pan_x = self.image_label.pan_offset_x
         pan_y = self.image_label.pan_offset_y
-        
-        base_scaled = self.original_pixmap.scaled(
-            self.image_label.size(), 
-            Qt.KeepAspectRatio, 
-            Qt.SmoothTransformation
-        )
-        
-        zoomed_w = int(base_scaled.width() * zoom)
-        zoomed_h = int(base_scaled.height() * zoom)
-        zoomed = self.original_pixmap.scaled(zoomed_w, zoomed_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+        zoomed_w, zoomed_h = self._compute_zoomed_size(zoom)
+        zoomed = self._get_zoomed_pixmap(zoomed_w, zoomed_h)
         
         canvas = QPixmap(self.image_label.size())
         canvas.fill(QColor(COLORS['canvas']))
@@ -1595,18 +1667,12 @@ class MainWindow(QMainWindow):
     def finalize_new_mask(self, start, end):
         if not self.original_pixmap:
             return
-        
+
         zoom = self.image_label.zoom_level
         pan_x = self.image_label.pan_offset_x
         pan_y = self.image_label.pan_offset_y
-        
-        base_scaled = self.original_pixmap.scaled(
-            self.image_label.size(), 
-            Qt.KeepAspectRatio, 
-            Qt.SmoothTransformation
-        )
-        zoomed_w = int(base_scaled.width() * zoom)
-        zoomed_h = int(base_scaled.height() * zoom)
+
+        zoomed_w, zoomed_h = self._compute_zoomed_size(zoom)
         zoomed_offset_x = (self.image_label.width() - zoomed_w) / 2
         zoomed_offset_y = (self.image_label.height() - zoomed_h) / 2
         
@@ -1744,20 +1810,13 @@ class MainWindow(QMainWindow):
     def draw_temp_box(self, start, end):
         if not self.original_pixmap:
             return
-        
+
         zoom = self.image_label.zoom_level
         pan_x = self.image_label.pan_offset_x
         pan_y = self.image_label.pan_offset_y
-        
-        base_scaled = self.original_pixmap.scaled(
-            self.image_label.size(), 
-            Qt.KeepAspectRatio, 
-            Qt.SmoothTransformation
-        )
-        
-        zoomed_w = int(base_scaled.width() * zoom)
-        zoomed_h = int(base_scaled.height() * zoom)
-        zoomed = self.original_pixmap.scaled(zoomed_w, zoomed_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+        zoomed_w, zoomed_h = self._compute_zoomed_size(zoom)
+        zoomed = self._get_zoomed_pixmap(zoomed_w, zoomed_h)
         
         canvas = QPixmap(self.image_label.size())
         canvas.fill(QColor(COLORS['canvas']))
@@ -1811,18 +1870,12 @@ class MainWindow(QMainWindow):
     def finalize_new_box(self, start, end):
         if not self.original_pixmap:
             return
-        
+
         zoom = self.image_label.zoom_level
         pan_x = self.image_label.pan_offset_x
         pan_y = self.image_label.pan_offset_y
-        
-        base_scaled = self.original_pixmap.scaled(
-            self.image_label.size(), 
-            Qt.KeepAspectRatio, 
-            Qt.SmoothTransformation
-        )
-        zoomed_w = int(base_scaled.width() * zoom)
-        zoomed_h = int(base_scaled.height() * zoom)
+
+        zoomed_w, zoomed_h = self._compute_zoomed_size(zoom)
         zoomed_offset_x = (self.image_label.width() - zoomed_w) / 2
         zoomed_offset_y = (self.image_label.height() - zoomed_h) / 2
         
@@ -1863,18 +1916,12 @@ class MainWindow(QMainWindow):
     def select_box_at(self, mouse_x, mouse_y):
         if not self.original_pixmap:
             return
-        
+
         zoom = self.image_label.zoom_level
         pan_x = self.image_label.pan_offset_x
         pan_y = self.image_label.pan_offset_y
-        
-        base_scaled = self.original_pixmap.scaled(
-            self.image_label.size(), 
-            Qt.KeepAspectRatio, 
-            Qt.SmoothTransformation
-        )
-        zoomed_w = int(base_scaled.width() * zoom)
-        zoomed_h = int(base_scaled.height() * zoom)
+
+        zoomed_w, zoomed_h = self._compute_zoomed_size(zoom)
         zoomed_offset_x = (self.image_label.width() - zoomed_w) / 2
         zoomed_offset_y = (self.image_label.height() - zoomed_h) / 2
         
@@ -2003,16 +2050,27 @@ class MainWindow(QMainWindow):
         boxes = self.annotation_mgr.get_boxes()
         self.file_mgr.save_annotations(txt_path, boxes)
         
-        self.lbl_info.setText("Saved" + (" (masks applied)" if masks_applied else ""))
+        # Update annotation cache and file list item
+        filename = os.path.basename(self.current_image_path)
+        self._annotation_cache[filename] = True
+        self._refresh_file_list_item(self.current_index)
+
+        msg = f"✓ Saved  ({len(boxes)} boxes)" + ("  — masks applied" if masks_applied else "")
+        self.lbl_info.setText(msg)
+        self.lbl_info.setStyleSheet(STATUS_SUCCESS_STYLE)
+        # Briefly flash the SAVE button green, then restore
+        self.btn_save.setStyleSheet(
+            "background-color: #22aa55; color: white; font-weight: bold; padding: 6px;"
+        )
+        QTimer.singleShot(600, self._restore_save_button)
         self.update_progress()
         QApplication.processEvents()
-        
+
         if go_next and self.current_index < len(self.image_list) - 1:
             self.current_index += 1
             self.load_image()
     
     def next_image(self):
-        self.save_annotation(go_next=False)
         if self.current_index < len(self.image_list) - 1:
             self.current_index += 1
             self.load_image()
@@ -2029,18 +2087,18 @@ class MainWindow(QMainWindow):
     
     def find_first_unannotated(self):
         for i, img in enumerate(self.image_list):
-            if not self.file_mgr.annotation_exists(self.image_folder, img):
+            if not self._annotation_exists(img):
                 return i
         return -1
-    
+
     def find_next_unannotated(self, start_from=None):
         start = start_from if start_from is not None else self.current_index + 1
-        
+
         for i in range(start, len(self.image_list)):
-            if not self.file_mgr.annotation_exists(self.image_folder, self.image_list[i]):
+            if not self._annotation_exists(self.image_list[i]):
                 return i
         for i in range(0, start):
-            if not self.file_mgr.annotation_exists(self.image_folder, self.image_list[i]):
+            if not self._annotation_exists(self.image_list[i]):
                 return i
         return -1
     
@@ -2065,32 +2123,7 @@ class MainWindow(QMainWindow):
         )
         
         if reply == QMessageBox.Yes:
-            try:
-                img_path = self.current_image_path
-                txt_path = os.path.splitext(img_path)[0] + ".txt"
-                filename = os.path.basename(img_path)
-                
-                if os.path.exists(img_path):
-                    os.remove(img_path)
-                if os.path.exists(txt_path):
-                    os.remove(txt_path)
-                
-                self.image_list.remove(filename)
-                
-                if not self.image_list:
-                    self.current_image_path = ""
-                    self.annotation_mgr.clear()
-                    self.image_label.setText("No images")
-                    return
-                
-                if self.current_index >= len(self.image_list):
-                    self.current_index = len(self.image_list) - 1
-                
-                self.progress_bar.setMaximum(len(self.image_list))
-                self.update_progress()
-                self.load_image()
-            except Exception as e:
-                QMessageBox.critical(self, "Error", str(e))
+            self._do_delete_current_image()
     
     def keyPressEvent(self, event):
         if event.modifiers() == Qt.ControlModifier:
@@ -2110,7 +2143,7 @@ class MainWindow(QMainWindow):
         elif key == Qt.Key_A:
             self.prev_image()
         elif key == Qt.Key_S:
-            self.save_annotation()
+            self.save_annotation(go_next=True)
         elif key == Qt.Key_W:
             self.toggle_draw_mode()
         elif key == Qt.Key_M:
@@ -2125,6 +2158,9 @@ class MainWindow(QMainWindow):
             self.goto_next_unannotated()
         elif key == Qt.Key_X:
             self.delete_current_image()
+        elif key == Qt.Key_Space:
+            if self.chk_space_delete.isChecked():
+                self._do_delete_current_image()
         elif key == Qt.Key_Escape:
             if self.draw_mode:
                 self.toggle_draw_mode()
@@ -2158,3 +2194,176 @@ class MainWindow(QMainWindow):
                 self.update_list_widget()
                 self.box_list.setCurrentRow(selected_idx)
                 self.draw_boxes()
+
+    # ------------------------------------------------------------------ #
+    #  Global key filter — shortcuts work regardless of focused widget    #
+    # ------------------------------------------------------------------ #
+
+    def eventFilter(self, obj, event):
+        if event.type() != QEvent.KeyPress:
+            return False
+
+        # Never steal keys from real text-input widgets
+        focused = QApplication.focusWidget()
+        from PyQt5.QtWidgets import QLineEdit, QTextEdit, QPlainTextEdit
+        if isinstance(focused, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            return False
+
+        key = event.key()
+        modifiers = event.modifiers()
+
+        # Ctrl shortcuts
+        if modifiers == Qt.ControlModifier:
+            if key in (Qt.Key_Z, Qt.Key_Y, Qt.Key_S):
+                self.keyPressEvent(event)
+                return True
+            return False
+
+        if modifiers != Qt.NoModifier:
+            return False
+
+        # Don't steal numeric/delete keys from QSpinBox
+        if isinstance(focused, QSpinBox) and key in (
+            Qt.Key_0, Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4,
+            Qt.Key_5, Qt.Key_6, Qt.Key_7, Qt.Key_8, Qt.Key_9,
+            Qt.Key_Delete, Qt.Key_Backspace,
+        ):
+            return False
+
+        # Our application shortcuts
+        if key in (
+            Qt.Key_S, Qt.Key_D, Qt.Key_A, Qt.Key_W, Qt.Key_Q,
+            Qt.Key_N, Qt.Key_X, Qt.Key_M, Qt.Key_C, Qt.Key_R,
+            Qt.Key_Space, Qt.Key_Escape, Qt.Key_Delete,
+            Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4, Qt.Key_5,
+            Qt.Key_6, Qt.Key_7, Qt.Key_8, Qt.Key_9, Qt.Key_0,
+        ):
+            self.keyPressEvent(event)
+            return True  # event consumed — don't pass to focused widget
+
+        return False
+
+    # ------------------------------------------------------------------ #
+    #  Helpers                                                             #
+    # ------------------------------------------------------------------ #
+
+    def _restore_save_button(self):
+        """Restore SAVE button colour after the flash animation."""
+        self.btn_save.setStyleSheet(
+            f"background-color: {COLORS['accent']}; color: white; font-weight: bold; padding: 6px;"
+        )
+
+    def _annotation_exists(self, img_name):
+        """Return cached annotation-existence status for an image."""
+        if img_name not in self._annotation_cache:
+            self._annotation_cache[img_name] = self.file_mgr.annotation_exists(
+                self.image_folder, img_name
+            )
+        return self._annotation_cache[img_name]
+
+    def _compute_zoomed_size(self, zoom):
+        """Compute (zoomed_w, zoomed_h) without scaling the pixmap."""
+        orig_w = self.original_pixmap.width()
+        orig_h = self.original_pixmap.height()
+        canvas_w = self.image_label.width()
+        canvas_h = self.image_label.height()
+        scale = min(canvas_w / orig_w, canvas_h / orig_h)
+        return int(orig_w * scale * zoom), int(orig_h * scale * zoom)
+
+    def _get_zoomed_pixmap(self, zoomed_w, zoomed_h):
+        """Return a cached zoomed pixmap, re-scaling only when necessary."""
+        cache_key = (id(self.original_pixmap), zoomed_w, zoomed_h)
+        if self._zoom_cache_key != cache_key:
+            self._zoom_cache_pixmap = self.original_pixmap.scaled(
+                zoomed_w, zoomed_h, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            self._zoom_cache_key = cache_key
+        return self._zoom_cache_pixmap
+
+    def update_file_list(self):
+        """Rebuild the left image-list panel."""
+        self.image_file_list.blockSignals(True)
+        self.image_file_list.clear()
+        for img in self.image_list:
+            has_label = self._annotation_exists(img)
+            item = QListWidgetItem(img)
+            if has_label:
+                item.setForeground(QColor('#88cc88'))
+                item.setToolTip(f"✓ {img}")
+            else:
+                item.setForeground(QColor('#cccc55'))
+                item.setToolTip(f"○ {img}")
+            self.image_file_list.addItem(item)
+        if self.image_list:
+            self.image_file_list.setCurrentRow(self.current_index)
+        self.image_file_list.blockSignals(False)
+
+    def _refresh_file_list_item(self, index):
+        """Update colour of one item in the file list after annotation state changed."""
+        if index < 0 or index >= self.image_file_list.count():
+            return
+        img = self.image_list[index]
+        has_label = self._annotation_exists(img)
+        item = self.image_file_list.item(index)
+        if item:
+            if has_label:
+                item.setForeground(QColor('#88cc88'))
+                item.setToolTip(f"✓ {img}")
+            else:
+                item.setForeground(QColor('#cccc55'))
+                item.setToolTip(f"○ {img}")
+
+    def on_file_list_selection(self, row):
+        """Handle click in the left image-list panel."""
+        if row >= 0 and row < len(self.image_list) and row != self.current_index:
+            self.current_index = row
+            self.load_image()
+
+    def _do_delete_current_image(self):
+        """Delete the current image (and its label) without asking for confirmation."""
+        if not self.current_image_path or not self.image_list:
+            return
+        try:
+            img_path = self.current_image_path
+            txt_path = os.path.splitext(img_path)[0] + ".txt"
+            filename = os.path.basename(img_path)
+
+            if os.path.exists(img_path):
+                os.remove(img_path)
+            if os.path.exists(txt_path):
+                os.remove(txt_path)
+
+            self._annotation_cache.pop(filename, None)
+            # Remove from file list widget before updating image_list
+            row = self.current_index
+            self.image_file_list.blockSignals(True)
+            self.image_file_list.takeItem(row)
+            self.image_file_list.blockSignals(False)
+
+            self.image_list.remove(filename)
+
+            if not self.image_list:
+                self.current_image_path = ""
+                self.annotation_mgr.clear()
+                self.original_pixmap = None
+                self._zoom_cache_key = None
+                self._zoom_cache_pixmap = None
+                self.image_label.clear()
+                self.image_label.setText("No images")
+                self.progress_bar.setMaximum(1)
+                self.progress_bar.setValue(0)
+                return
+
+            if self.current_index >= len(self.image_list):
+                self.current_index = len(self.image_list) - 1
+
+            self.progress_bar.setMaximum(len(self.image_list))
+            self.update_progress()
+
+            self.image_file_list.blockSignals(True)
+            self.image_file_list.setCurrentRow(self.current_index)
+            self.image_file_list.blockSignals(False)
+
+            self.load_image()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
